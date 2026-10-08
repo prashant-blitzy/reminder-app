@@ -1,0 +1,39 @@
+# Git ignore rules for reminder-app.
+# One pattern per line, grouped by intent. Paths listed here are generated,
+# runtime or research artefacts; every product file (README.md, the workspace
+# manifests, tsconfig.base.json, client/** and server/**) stays tracked.
+
+# dependencies
+node_modules/
+
+# build output
+# Unanchored on purpose: this one entry covers the build output of both
+# workspaces, client/dist/ and server/dist/.
+dist/
+
+# database
+# The SQLite database and its sidecars. With DATABASE_PATH unset the file is
+# server/data/reminders.sqlite next to the server package, and WAL mode lands
+# reminders.sqlite-wal and reminders.sqlite-shm beside it; the patterns below
+# are left unanchored because DATABASE_PATH can point the database anywhere.
+server/data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# coverage
+coverage/
+
+# local configuration
+# No env file is created by this project (PORT and DATABASE_PATH carry working
+# defaults), but a local one must never be committed if it appears.
+.env
+.env.*
+*.log
+npm-debug.log*
+
+# this run's research artefacts
+# Probe screenshots and platform metering output: not part of the product.
+blitzy/
+metering-inventory.md
