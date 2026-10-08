@@ -1,0 +1,557 @@
+/*
+ * Reminder screen styles.
+ *
+ * One hand-written stylesheet carries every visual rule for the single screen: the
+ * channel-status line with its in-app alert region, the create form, and the reminder
+ * list with its rows and its empty, loading and error states. The markup beside it is
+ * plain semantic HTML, so the screen stays readable and operable when this stylesheet
+ * does not load: nothing below supplies content, hides an element that carries meaning,
+ * or turns a styled span into a control.
+ *
+ * Class vocabulary - a fixed contract, shared with the components folder, so each
+ * selector is written once here and consumed there:
+ *   .app, .app__title
+ *   .notification-banner, .notification-banner__status, .notification-banner__alerts,
+ *   .alert, .alert__text, .alert__due, .alert__dismiss
+ *   .reminder-form, .reminder-form__field, .reminder-form__label, .reminder-form__input,
+ *   .reminder-form__counter, .reminder-form__error, .reminder-form__submit
+ *   .reminder-list, .error-banner, .error-banner__message, .error-banner__retry,
+ *   .reminder-list__placeholder, .reminder-list__empty, .reminder-list__items
+ *   .reminder-item, .reminder-item__text, .reminder-item__due, .reminder-item__status,
+ *   .reminder-item__actions, .reminder-item__action
+ *   .reminder-item--upcoming, .reminder-item--overdue, .reminder-item--completed
+ *   .visually-hidden
+ *
+ * Value discipline: every colour, length, radius, duration and the font stack itself is
+ * a custom property declared once in the custom-property block below and referenced
+ * with var(...) from each declaration site, so no repeated value is written twice.
+ * Specificity is solved by the single-class vocabulary, never by a cascade escape hatch.
+ *
+ * Layout: the screen is one column at every width. The form row and the reminder rows
+ * wrap as the space they get shrinks, and there are no breakpoint queries anywhere.
+ * Motion: no keyframes and no transition longer than a short colour change, so nothing
+ * here can animate a message out of sight.
+ */
+
+/* -------------------------------------------------------------------------- *
+ * Custom properties - one declaration site for every repeated value.        *
+ * -------------------------------------------------------------------------- */
+:root {
+  /* Layout and hairlines */
+  --container-max: 48rem;
+  --radius: 0.5rem;
+  --radius-pill: 999px;
+  --border-width: 1px;
+  --mark-width: 0.25rem;
+  --focus-outline-width: 0.125rem;
+  --focus-outline-offset: 0.125rem;
+
+  /* Reserved sizes: the smallest box a region keeps so the page never jumps */
+  --control-min-block-size: 2.75rem;
+  --row-min-block-size: 3.5rem;
+  --alerts-min-block-size: 2.75rem;
+  --alerts-max-block-size: 14rem;
+  --message-min-block-size: 1.25rem;
+
+  /* Flex bases that make the wrapping rows narrow gracefully */
+  --text-basis: 12rem;
+  --field-basis-text: 15rem;
+  --field-basis-date: 8rem;
+
+  /* Spacing scale, used for padding, gaps and margins alike */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+
+  /* Type */
+  --font-stack: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+  --font-size-sm: 0.875rem;
+  --font-size-base: 1rem;
+  --font-size-lg: 1.125rem;
+  --font-size-xl: 1.5rem;
+  --line-height-base: 1.5;
+  --line-height-tight: 1.25;
+  --font-weight-semibold: 600;
+
+  /* One palette for one light scheme - no theme switching of any kind */
+  --color-bg: #f4f5f7;
+  --color-surface: #ffffff;
+  --color-text: #1f2933;
+  --color-text-muted: #5c6772;
+  --color-border: #cbd2d9;
+  --color-accent: #1d4ed8;
+  --color-accent-strong: #1739a8;
+  --color-accent-surface: #eef2ff;
+  --color-on-accent: #ffffff;
+  --color-danger: #b3261e;
+  --color-danger-strong: #8c1d18;
+  --color-danger-surface: #fdecea;
+  --color-on-danger: #ffffff;
+
+  /* Status colours, each paired with a textual label at every use */
+  --status-upcoming: #1d4ed8;
+  --status-overdue: #b3261e;
+  --status-completed: #0f7b3f;
+
+  /* Motion */
+  --duration-fast: 150ms;
+  --ease-out: ease-out;
+
+  /* The document typeface is declared here, inside the custom-property block, so the
+     stack is written once and the whole document inherits it; the controls below
+     re-inherit it through the font shorthand. */
+  font-family: var(--font-stack);
+}
+
+/* -------------------------------------------------------------------------- *
+ * Base - document shell, box model, control inheritance, focus indicator.    *
+ * -------------------------------------------------------------------------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding-block: var(--space-5);
+  padding-inline: var(--space-4);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
+}
+
+/* Form controls do not inherit type by default; without this they would fall back to
+   the platform UI font and break the single typeface. */
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+/* Every control in the screen shares one box, one border and one transition, so the
+   focus indicator is guaranteed the same place to appear on each of them. */
+.reminder-form__submit,
+.reminder-item__action,
+.alert__dismiss,
+.error-banner__retry {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: var(--control-min-block-size);
+  padding-block: var(--space-2);
+  padding-inline: var(--space-3);
+  color: var(--color-text);
+  background-color: var(--color-surface);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+/* A keyboard user always gets a visible ring; the ring is never removed without being
+   replaced. */
+.reminder-form__input:focus-visible,
+.reminder-form__submit:focus-visible,
+.reminder-item__action:focus-visible,
+.alert__dismiss:focus-visible,
+.error-banner__retry:focus-visible {
+  outline: var(--focus-outline-width) solid var(--color-accent);
+  outline-offset: var(--focus-outline-offset);
+}
+
+/* -------------------------------------------------------------------------- *
+ * Screen container.                                                          *
+ * -------------------------------------------------------------------------- */
+.app {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-inline-size: var(--container-max);
+  margin-inline: auto;
+}
+
+.app__title {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  line-height: var(--line-height-tight);
+}
+
+/* -------------------------------------------------------------------------- *
+ * Channel status and the in-app alert region.                                *
+ * -------------------------------------------------------------------------- */
+.notification-banner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background-color: var(--color-surface);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.notification-banner__status {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* The alert list is a live region. Its height is reserved so the regions below it do
+   not move as the first alert arrives, and it scrolls instead of pushing the form out
+   of view once several alerts stack up. */
+.notification-banner__alerts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-block-size: var(--alerts-min-block-size);
+  max-block-size: var(--alerts-max-block-size);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+/* One alert names the reminder, its due time and a way to dismiss it; the leading mark
+   repeats the accent colour so the alert is distinguishable as a shape and not only as
+   a tint. */
+.alert {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding-block: var(--space-2);
+  padding-inline: var(--space-3);
+  background-color: var(--color-accent-surface);
+  border-inline-start: var(--mark-width) solid var(--color-accent);
+  border-radius: var(--radius);
+}
+
+.alert__text {
+  flex: 1 1 var(--text-basis);
+  min-inline-size: 0;
+  overflow-wrap: break-word;
+  font-size: var(--font-size-lg);
+}
+
+.alert__due {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.alert__dismiss {
+  flex: 0 0 auto;
+  font-size: var(--font-size-sm);
+}
+
+/* -------------------------------------------------------------------------- *
+ * Create form: reminder text, due date and due time, each with its message.   *
+ * -------------------------------------------------------------------------- */
+.reminder-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background-color: var(--color-surface);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+/* The fields sit in the plan's order - reminder text, then due date, then due time - so
+   the text field takes the free width of the row while the two date and time fields keep
+   a narrow basis and wrap onto their own line as the row shrinks. */
+.reminder-form__field {
+  display: flex;
+  flex: 1 1 var(--field-basis-text);
+  flex-direction: column;
+  gap: var(--space-1);
+  min-inline-size: 0;
+}
+
+.reminder-form__field:nth-child(2),
+.reminder-form__field:nth-child(3) {
+  flex: 0 1 var(--field-basis-date);
+}
+
+.reminder-form__label {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.reminder-form__input {
+  inline-size: 100%;
+  min-block-size: var(--control-min-block-size);
+  padding-block: var(--space-2);
+  padding-inline: var(--space-3);
+  color: var(--color-text);
+  background-color: var(--color-surface);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.reminder-form__counter {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The message under a rejected field is a live region. Its line is reserved whether or
+   not it carries text, so the row does not shift between an accepted and a rejected
+   submit, and a rejection is marked by a leading rule and a heavier weight as well as by
+   colour - colour alone never carries a state. */
+.reminder-form__error {
+  min-block-size: var(--message-min-block-size);
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.reminder-form__error:not(:empty) {
+  padding-block: var(--space-1);
+  padding-inline-start: var(--space-2);
+  color: var(--color-danger);
+  border-inline-start: var(--mark-width) solid var(--color-danger);
+  font-weight: var(--font-weight-semibold);
+}
+
+.reminder-form__submit {
+  flex: 0 0 auto;
+  padding-inline: var(--space-4);
+  color: var(--color-on-accent);
+  background-color: var(--color-accent);
+  border-color: var(--color-accent);
+  font-weight: var(--font-weight-semibold);
+}
+
+.reminder-form__submit:not(:disabled):hover {
+  background-color: var(--color-accent-strong);
+  border-color: var(--color-accent-strong);
+}
+
+.reminder-form__submit:disabled {
+  color: var(--color-text-muted);
+  background-color: var(--color-border);
+  border-color: var(--color-border);
+  cursor: not-allowed;
+}
+
+/* -------------------------------------------------------------------------- *
+ * Reminder list: the single error banner, the two states, and the rows.       *
+ * -------------------------------------------------------------------------- */
+.reminder-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* The one request-error banner sits above the rows; the form and the rows stay usable
+   while it is shown. It carries real message text and a retry control. */
+.error-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  min-block-size: var(--row-min-block-size);
+  padding-block: var(--space-3);
+  padding-inline: var(--space-4);
+  background-color: var(--color-danger-surface);
+  border: var(--border-width) solid var(--color-danger);
+  border-inline-start-width: var(--mark-width);
+  border-radius: var(--radius);
+}
+
+.error-banner__message {
+  flex: 1 1 var(--text-basis);
+  min-inline-size: 0;
+  margin: 0;
+  overflow-wrap: break-word;
+  color: var(--color-danger);
+  font-weight: var(--font-weight-semibold);
+}
+
+.error-banner__retry {
+  flex: 0 0 auto;
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+.error-banner__retry:not(:disabled):hover {
+  color: var(--color-on-danger);
+  background-color: var(--color-danger-strong);
+  border-color: var(--color-danger-strong);
+}
+
+/* The placeholder for the first fetch occupies the same box as a real row, so the region
+   keeps its size and nothing jumps when the rows arrive. Nothing animates here: a
+   loading state must never be able to obscure a message. */
+.reminder-list__placeholder {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-block-size: var(--row-min-block-size);
+  margin: 0;
+  padding-block: var(--space-3);
+  padding-inline: var(--space-4);
+  color: var(--color-text-muted);
+  background-color: var(--color-surface);
+  border: var(--border-width) dashed var(--color-border);
+  border-radius: var(--radius);
+}
+
+.reminder-list__empty {
+  margin: 0;
+  padding-block: var(--space-4);
+  padding-inline: var(--space-4);
+  color: var(--color-text-muted);
+  background-color: var(--color-surface);
+  border: var(--border-width) dashed var(--color-border);
+  border-radius: var(--radius);
+  text-align: center;
+}
+
+.reminder-list__items {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* One reminder row. Its leading mark carries the status colour and the row's own status
+   label spells the same state out as text, so no state is signalled by colour alone; the
+   mark differs in style as well as in colour - solid for the two live states, dashed for
+   a completed one. */
+.reminder-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  min-block-size: var(--row-min-block-size);
+  padding-block: var(--space-3);
+  padding-inline: var(--space-4);
+  background-color: var(--color-surface);
+  border: var(--border-width) solid var(--color-border);
+  border-inline-start-width: var(--mark-width);
+  border-radius: var(--radius);
+}
+
+.reminder-item__text {
+  flex: 1 1 var(--text-basis);
+  min-inline-size: 0;
+  margin: 0;
+  overflow-wrap: break-word;
+}
+
+.reminder-item__due {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.reminder-item__status {
+  padding-block: var(--space-1);
+  padding-inline: var(--space-2);
+  border: var(--border-width) solid currentColor;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+
+.reminder-item__actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-inline-start: auto;
+}
+
+.reminder-item__action {
+  padding-inline: var(--space-3);
+  font-size: var(--font-size-sm);
+}
+
+.reminder-item__action:not(:disabled):hover {
+  background-color: var(--color-bg);
+  border-color: var(--color-text-muted);
+}
+
+/* Deletion is the last control of the cluster, offered after completion, so it takes the
+   danger treatment while completion stays neutral. */
+.reminder-item__action:last-child {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+.reminder-item__action:last-child:not(:disabled):hover {
+  color: var(--color-on-danger);
+  background-color: var(--color-danger-strong);
+  border-color: var(--color-danger-strong);
+}
+
+.reminder-item__action:disabled {
+  color: var(--color-text-muted);
+  background-color: var(--color-surface);
+  border-color: var(--color-border);
+  cursor: not-allowed;
+}
+
+/* Upcoming: the due time is still ahead, on a neutral row. */
+.reminder-item--upcoming {
+  border-inline-start-color: var(--status-upcoming);
+}
+
+.reminder-item--upcoming .reminder-item__status {
+  color: var(--status-upcoming);
+}
+
+/* Overdue: the due time has passed, on a tinted row, with the textual label beside it. */
+.reminder-item--overdue {
+  background-color: var(--color-danger-surface);
+  border-inline-start-color: var(--status-overdue);
+}
+
+.reminder-item--overdue .reminder-item__status {
+  color: var(--status-overdue);
+}
+
+/* Completed: decided before the due time is considered, so this row never takes the
+   overdue treatment. Its text is struck through - a shape rather than a tint - and its
+   leading mark is dashed. */
+.reminder-item--completed {
+  background-color: var(--color-bg);
+  border-inline-start-color: var(--status-completed);
+  border-inline-start-style: dashed;
+}
+
+.reminder-item--completed .reminder-item__text {
+  color: var(--color-text-muted);
+  text-decoration: line-through;
+}
+
+.reminder-item--completed .reminder-item__status {
+  color: var(--status-completed);
+}
+
+/* -------------------------------------------------------------------------- *
+ * Utility: clip content out of sight without taking it out of the page.       *
+ * -------------------------------------------------------------------------- */
+.visually-hidden {
+  position: absolute;
+  overflow: hidden;
+  inline-size: var(--border-width);
+  block-size: var(--border-width);
+  margin: calc(var(--border-width) * -1);
+  padding: 0;
+  border: 0;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
