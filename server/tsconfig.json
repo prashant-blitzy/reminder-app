@@ -4,14 +4,13 @@
     "target": "ES2022",
     "lib": ["ES2022"],
     "module": "commonjs",
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
     "isolatedModules": true,
     "rootDir": "./src",
     "outDir": "./dist",
-    "types": ["node"]
+    "types": ["node"],
+    "sourceMap": false,
+    "declaration": false
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "dist"]
+  "exclude": ["node_modules", "src/**/*.test.ts", "dist"]
 }
