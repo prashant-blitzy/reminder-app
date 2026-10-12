@@ -17,11 +17,13 @@
  * - `describe`, `it`, `expect`, `beforeAll`, `afterAll` and `vi` are the vitest globals
  *   (`globals: true`), so the only import is the unit under test.
  *
- * The suite is deterministic: it reads no wall clock, uses no fake timers (the module takes no
- * clock), touches no network and mocks nothing.
+ * The suite is deterministic: it touches no network and mocks nothing. The conversion and formatting
+ * tests read no wall clock and use no fake timers, because those functions take no clock; the
+ * `currentInstantIso` block at the end fakes the timers, because reading the wall clock is exactly
+ * what that accessor does, and restores the real ones as soon as it is done.
  */
 
-import { formatLocalDueAt, toDueAtIso } from './time';
+import { currentInstantIso, formatLocalDueAt, toDueAtIso } from './time';
 
 /**
  * The zone the whole suite runs in. It observes daylight saving, so its 2026 offsets are UTC−5
@@ -279,5 +281,54 @@ describe('toDueAtIso — input the module must refuse', () => {
       expect(toDueAtIso(date, time)).not.toBe('Invalid Date');
       expect(() => toDueAtIso(date, time)).not.toThrow();
     }
+  });
+});
+
+describe('currentInstantIso — the client\'s single wall-clock read', () => {
+  /**
+   * The instant the faked clock is pinned to. It carries milliseconds on purpose: the accessor must
+   * reproduce the platform clock exactly, not round it.
+   */
+  const PINNED_INSTANT = '2026-10-07T12:34:56.789Z';
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(PINNED_INSTANT));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('reads the platform clock as an absolute ISO-8601 UTC instant', () => {
+    expect(currentInstantIso()).toBe(PINNED_INSTANT);
+  });
+
+  it('moves with the clock instead of caching the first instant it read', () => {
+    const first = currentInstantIso();
+    vi.setSystemTime(new Date(Date.parse(PINNED_INSTANT) + 30_000));
+    const second = currentInstantIso();
+
+    expect(first).toBe(PINNED_INSTANT);
+    expect(second).toBe('2026-10-07T12:35:26.789Z');
+    expect(Date.parse(second) - Date.parse(first)).toBe(30_000);
+  });
+
+  it('names an instant a stored reminder can be compared against, and formats without an error', () => {
+    const instant = currentInstantIso();
+    expect(Number.isNaN(Date.parse(instant))).toBe(false);
+    expect(formatLocalDueAt(instant)).not.toContain('Invalid');
+  });
+
+  it('names an instant the conversion resolves back to, so both halves of the module agree', () => {
+    // The accessor supplies the instant the due check compares against; the conversion supplies the
+    // instant the form stores. Both are absolute instants in the same representation, which is what
+    // lets a reminder created a moment before it comes due be selected by the check immediately.
+    const instant = currentInstantIso();
+    const roundTripped = toDueAtIso(localDateOf(new Date(instant)), localTimeOf(new Date(instant)));
+
+    expect(roundTripped).not.toBeNull();
+    // The form offers minute precision, so the round trip drops the seconds and agrees to the minute.
+    expect(Math.abs(Date.parse(roundTripped ?? '') - Date.parse(instant))).toBeLessThan(60_000);
   });
 });

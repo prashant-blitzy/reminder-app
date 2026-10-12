@@ -2,11 +2,13 @@
  * The client's single conversion between the local date and time a user types and the absolute UTC
  * instant the server stores, and the single formatter that renders a stored instant for the viewer.
  *
- * This is the only place in the client where a timestamp changes representation. Every other module
- * imports it rather than repeating any part of it: the create form (which turns the typed date and
- * time into the `dueAt` it sends), the reminder row (which renders a stored instant), the due check
- * (which compares stored instants against the current instant) and the client validation copy.
- * A second conversion anywhere else is a defect.
+ * This is the only place in the client where a timestamp changes representation, and — through
+ * `currentInstantIso` below — the only place the wall clock is read. Every other module imports it
+ * rather than repeating any part of it: the create form (which turns the typed date and time into
+ * the `dueAt` it sends, and reads the current instant for its past-due rule), the reminder row
+ * (which renders a stored instant), the due check (which compares stored instants against the
+ * current instant) and the client validation copy. A second conversion anywhere else is a defect,
+ * and so is a second clock read anywhere else.
  *
  * Why this arrangement is the daylight-saving-correct one: the typed year, month, day, hour and
  * minute are resolved ONCE, by the platform, through the local `Date` constructor, using the UTC
@@ -140,4 +142,26 @@ export function formatLocalDueAt(iso: string): string {
   });
 
   return formatter.format(new Date(instant));
+}
+
+/**
+ * The client's single wall-clock accessor: the current instant, as an absolute UTC ISO-8601 string.
+ *
+ * The value is in exactly the representation the server stores and returns (ISO-8601 with a `Z`
+ * suffix), so a caller can compare it with a stored `dueAt` directly. It is read from the platform
+ * clock on every call and cached nowhere: a cached "now" is a stale "now", which is the one thing a
+ * due check cannot tolerate.
+ *
+ * Why it belongs here rather than with a caller: the client must have ONE time source. The due check
+ * in `client/src/hooks/useDueCheck.ts` reads it once per run, reports that instant to the screen and
+ * passes it down as an argument; the create form reads it once per submit for the pre-flight
+ * past-due rule, which likewise takes the instant as a parameter (`client/src/lib/validation.ts`).
+ * Callers must therefore treat one call as the whole "now" of a decision and must not call it again
+ * inside that decision — a second call would let two judgements about the same reminder be made from
+ * two different instants.
+ *
+ * @returns The current instant as an ISO-8601 UTC string with a `Z` suffix and millisecond precision.
+ */
+export function currentInstantIso(): string {
+  return new Date().toISOString();
 }
