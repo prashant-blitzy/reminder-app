@@ -1,74 +1,198 @@
 /**
  * Tests for `./ReminderForm` — the create form's behaviour, exercised through the DOM a user sees.
  *
- * What this suite is the evidence for, and why each part of it is faked the way it is:
+ * What this suite is the evidence for:
  *
- * - The four refusals and their exact wording. Each message is asserted against
- *   `VALIDATION_MESSAGES`, the one place the strings are written, so a reworded message fails here
- *   rather than silently reaching the user — and the same literals are asserted by
- *   `client/src/lib/validation.test.ts`, which is what holds the client copy and the server copy in
- *   step.
+ * - The four refusals and their exact wording — empty or whitespace-only text, a text over 280
+ *   characters, a missing or unusable due date and time, and a due time in the past — each reported
+ *   under the field it belongs to, with that field focused and the message associated with it.
  * - The guarantee that a refused submission saves nothing: every refusal case asserts that the
  *   create call was never made. The call is a `vi.fn()` stand-in for the parent's create, which is
  *   also how the failure path is driven — the form's own `create` prop is the seam, so no HTTP layer,
- *   no server and no network is involved anywhere in this file.
- * - The one permission request, from the `default` reading only, on the submit gesture. The channel
- *   module is mocked, because what this suite must prove is when the form asks and when it does not;
- *   the module's own behaviour in each reading is `client/src/lib/notifications.test.ts`'s subject.
- * - The counter, the labels, the missing `maxLength`, and the field-wrapping the stylesheet's
- *   `nth-child(2)`/`:nth-child(3)` rules depend on.
+ *   no server, no browser storage and no network is involved anywhere in this file.
+ * - The 280/281 boundary: exactly the bound is accepted and sent trimmed, one character more is
+ *   refused.
+ * - The request body: exactly `text` and `dueAt`, with `dueAt` the instant the typed local date and
+ *   time name. No identity-bearing field is ever sent, because the client derives none of them.
+ * - The one permission request this application spends: none on mount, exactly one on the first
+ *   successful submit from a `default` reading, none afterwards, and none at all from any other
+ *   reading.
+ * - The failure path: the server's own wording under the input the server named (or at form level
+ *   when it named none) with every entered value kept, and the submit control usable again.
  *
- * The clock is pinned (`vi.setSystemTime`) so that "in the future" and "in the past" are decided by
- * this file rather than by the day the suite happens to run, and the two dates are chosen far from
- * the pinned instant in both directions so no zone or daylight-saving offset can move the verdict.
- * `user-event` types and clicks as a user does; the two platform pickers are driven with
- * `fireEvent.change`, because jsdom does not implement a date input's own spinner.
+ * The substitutions, and why each is the one that makes the evidence real:
+ *
+ * - `../lib/notifications` is NOT replaced. Only its `requestPermission` is wrapped by a counting spy
+ *   that delegates to the module's own function, so the reading the form acts on is still the one the
+ *   real `getChannelSnapshot()` derives from the stubbed `Notification` global — a hand-written stand-in
+ *   could agree with the form about a reading the real module would never report. The stub is a plain
+ *   object carrying a reading and a `requestPermission` that answers and then reports that answer, as a
+ *   browser does once the user has answered the prompt; a case that installs no stub is the unsupported
+ *   browser, which is jsdom's own state (it implements no notification API).
+ * - Every case loads a FRESH instance of the component and of the channel module it calls
+ *   (`vi.resetModules()` in `beforeEach`, then a dynamic `import('./ReminderForm')` inside that case's
+ *   setup). The channel module keeps private session state — the reading a completed permission
+ *   request resolved, plus a cached snapshot and the alert list — and deliberately exports no
+ *   test-only reset, so a static import would let one case inherit what another left behind and make
+ *   this suite depend on its own case order. For the same reason the counting spy is held in
+ *   `vi.hoisted`: the `vi.mock` factory runs again for every fresh module instance, and the spy's
+ *   identity has to outlive that or the assertions would count a function that no longer exists.
+ * - The clock is pinned (`vi.setSystemTime`) so that "in the future" and "in the past" are decided by
+ *   this file rather than by the day the suite happens to run, and both dates are years from the pin
+ *   so no zone or daylight-saving offset can move the verdict. `shouldAdvanceTime` is required rather
+ *   than cosmetic: React's asynchronous `act`, which every awaited `user-event` call is wrapped in,
+ *   never settles while the faked clock cannot move, so a frozen clock times out on the first click
+ *   (measured, including with `delay: null` and with a `toFake` list that leaves `queueMicrotask`
+ *   alone). The instant is still this file's, not the platform's: nothing below compares against the
+ *   real clock, and the two dates sit years either side of the pin.
+ * - `userEvent.setup({ advanceTimers: vi.advanceTimersByTime })` is what lets typing and clicking
+ *   settle while the fake clock owns the timers. The bare `userEvent` export is never used here.
+ * - The message literals are written out below rather than imported from `../lib/validation`, so a
+ *   reworded message fails here instead of silently reaching the user. This is also what pins them in
+ *   step with the server: `client/src/lib/validation.test.ts` asserts the same strings against the
+ *   server's copy of the rules.
+ * - Every case that submits declares its channel reading explicitly. The cases about validation and
+ *   clearing declare `denied`, so the permission path cannot be what makes them pass or fail, and the
+ *   reading that spends the request is exercised only by the cases that exist to spend it.
+ * - The two platform pickers are driven with `fireEvent.change`, because jsdom implements none of a
+ *   date or time input's own editor and normalises a value the control cannot hold to the empty
+ *   string — which one case below asserts explicitly rather than papering over.
  */
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import { ApiError } from '../lib/remindersApi';
-import { toDueAtIso } from '../lib/time';
-import { MAX_TEXT_LENGTH, VALIDATION_MESSAGES } from '../lib/validation';
 import type { CreateReminderInput, Reminder } from '../types';
-import { ReminderForm } from './ReminderForm';
 
 /**
- * The channel the mocked notifications module reports, and the spy on the request the form spends.
+ * The wording of each refusal and of the generic fallback, character for character as the user reads
+ * it.
  *
- * Held in `vi.hoisted` because `vi.mock`'s factory is hoisted above this file's imports and can only
- * see values that are hoisted with it.
+ * Written out here on purpose: a constant imported from the module under test's own rule set could not
+ * tell a reworded refusal from an unchanged one.
  */
-const channel = vi.hoisted(() => ({
-  permission: 'default' as 'default' | 'granted' | 'denied' | 'unsupported',
-  requestPermission: vi.fn(),
-}));
+const TEXT_REQUIRED = 'Enter a reminder text.';
+const TEXT_TOO_LONG = 'Reminder text must be 280 characters or fewer.';
+const DUE_AT_INVALID = 'Enter a valid due date and time.';
+const DUE_AT_IN_PAST = 'The due time must be in the future.';
+const GENERIC_ERROR = 'Something went wrong. Please try again.';
 
-vi.mock('../lib/notifications', () => ({
-  getChannelSnapshot: () => ({
-    permission: channel.permission,
-    bannerText: `channel:${channel.permission}`,
-    alerts: [],
-  }),
-  requestPermission: () => {
-    channel.requestPermission();
-    return Promise.resolve(channel.permission);
-  },
-}));
+/**
+ * The wording the server's refusal carries in the failure cases below.
+ *
+ * Deliberately a string none of the five above can produce, so asserting it proves the `ApiError`'s
+ * own message reached the field rather than one this client invented.
+ */
+const SERVER_REFUSAL = 'That reminder text was refused by the server.';
 
-/** The instant the clock is pinned to, so no assertion below depends on the day of the run. */
+/** The bound the text rule measures against, as the rule states it. */
+const MAX_TEXT_LENGTH = 280;
+
+/** The instant the faked clock is pinned to, so no verdict below depends on the day of the run. */
 const PINNED_NOW = new Date('2026-10-07T12:00:00Z');
 
-/** A date and time far enough ahead of the pinned instant to be unambiguously in the future. */
+/** A local date and time far enough ahead of the pin to be unambiguously in the future. */
 const FUTURE_DATE = '2030-01-02';
 const FUTURE_TIME = '09:30';
 
-/** A date far enough behind the pinned instant to be unambiguously in the past. */
+/**
+ * The instant `FUTURE_DATE` and `FUTURE_TIME` name: built here from the same local components the
+ * user entered, so the expectation is correct in every zone and independent of the client's own
+ * converter. January 2nd is nowhere near a daylight-saving transition in any zone.
+ */
+const FUTURE_INSTANT = new Date(2030, 0, 2, 9, 30).toISOString();
+
+/** A local date and time far enough behind the pin to be unambiguously in the past. */
 const PAST_DATE = '2020-01-01';
 const PAST_TIME = '09:30';
 
-/** Builds the reminder the create stub resolves with, echoing the input the form sent. */
+/** The form's create prop, as the parent supplies it. */
+type CreateProp = (input: CreateReminderInput) => Promise<Reminder>;
+
+/**
+ * The counting spy on the one permission request the form spends.
+ *
+ * The count is the assertion, not the platform's answer: whether an answer arrives is
+ * `client/src/lib/notifications.test.ts`'s subject, while what this suite must prove is WHEN the form
+ * asks — never on load, once on the first successful submit, and never from another reading.
+ */
+const { permissionRequests } = vi.hoisted(() => ({ permissionRequests: vi.fn() }));
+
+/**
+ * Mocks exactly one export of the channel module and keeps every other one real.
+ *
+ * Spreading the actual module is what leaves `getChannelSnapshot` in place, so the reading the form
+ * compares is still derived from the stubbed `Notification` global rather than from anything this
+ * file decides.
+ */
+vi.mock('../lib/notifications', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/notifications')>();
+
+  return {
+    ...actual,
+    requestPermission: () => {
+      permissionRequests();
+      return actual.requestPermission();
+    },
+  };
+});
+
+/** How a case's browser reports notification permission, before any request is made. */
+type Reading = 'granted' | 'denied' | 'default';
+
+/** What one case needs back from the stubbed browser channel. */
+interface FakeBrowserChannel {
+  /** How many times the code under test called the platform's own `requestPermission`. */
+  platformRequests(): number;
+}
+
+/**
+ * Stubs a `Notification` global that reports `reading` and answers a permission request with `answer`,
+ * moving its own reading to that answer as a browser does once the user has answered the prompt.
+ *
+ * @param reading The reading the stub reports before any request is made.
+ * @param answer The reading a request resolves with, and the reading the stub reports afterwards.
+ * @returns The record a case can assert on.
+ */
+function stubBrowserChannel(reading: Reading, answer: Reading = 'granted'): FakeBrowserChannel {
+  const state: { permission: unknown } = { permission: reading };
+
+  const requestPermission = vi.fn(() => {
+    state.permission = answer;
+    return Promise.resolve(answer);
+  });
+
+  vi.stubGlobal('Notification', {
+    get permission(): unknown {
+      return state.permission;
+    },
+    requestPermission,
+  });
+
+  return { platformRequests: () => requestPermission.mock.calls.length };
+}
+
+/**
+ * Builds the failure the create prop rejects with, as the type the application really throws.
+ *
+ * The `ApiError` class is loaded here, inside the case that needs it, rather than imported at the top
+ * of this file. `vi.resetModules()` hands the component a fresh `../lib/remindersApi` instance, so a
+ * class captured from that module's first instance is a different constructor, `instanceof` inside the
+ * form would be false, and every failure would take the unclassifiable branch — the branch these cases
+ * exist to distinguish themselves from.
+ *
+ * @param message The wording the server sent.
+ * @param status The HTTP status that failed.
+ * @param field The input the server attributed the failure to, when it named one.
+ * @returns A promise that rejects with that `ApiError`.
+ */
+async function failWith(message: string, status: number, field?: 'text' | 'dueAt'): Promise<never> {
+  const { ApiError } = await import('../lib/remindersApi');
+
+  throw new ApiError(message, status, field);
+}
+
+/** Builds the reminder a create stub resolves with, echoing the input the form sent. */
 function makeReminder(input: CreateReminderInput): Reminder {
   return {
     id: 'reminder-1',
@@ -110,19 +234,29 @@ function form(): HTMLFormElement {
 }
 
 /**
- * Renders the form with a create stub and returns everything a test needs to drive and assert it.
+ * The form's message regions in document order: the text field's, the due-time pair's — which covers
+ * both of its controls — and, when a failure named no input at all, a fourth at form level.
+ */
+function messageRegions(): HTMLElement[] {
+  return Array.from(document.querySelectorAll<HTMLElement>('.reminder-form__error'));
+}
+
+/**
+ * Renders a fresh instance of the form with a create stub, and returns what a case drives it with.
+ *
+ * The component and the channel module are imported dynamically, after the `vi.resetModules()` in
+ * `beforeEach`, so this case sees its own instances of both rather than another case's module state.
  *
  * @param create The behaviour of the create prop; by default it resolves a reminder echoing the
  *   input, which is the success path.
  */
-function setup(create?: (input: CreateReminderInput) => Promise<Reminder>) {
-  const createMock = vi.fn(
-    create ?? (async (input: CreateReminderInput): Promise<Reminder> => makeReminder(input)),
-  );
+async function setup(create: CreateProp = async (input) => makeReminder(input)) {
+  const createMock = vi.fn<CreateProp>(create);
+  const { ReminderForm } = await import('./ReminderForm');
 
-  const view = render(<ReminderForm create={createMock} />);
+  render(<ReminderForm create={createMock} />);
 
-  return { createMock, view, user: userEvent.setup() };
+  return { createMock, user: userEvent.setup({ advanceTimers: vi.advanceTimersByTime }) };
 }
 
 /** Fills the three inputs; the text is typed as a user types it, the pickers are set directly. */
@@ -149,22 +283,25 @@ async function submit(user: ReturnType<typeof userEvent.setup>): Promise<void> {
 }
 
 beforeEach(() => {
-  // The clock is pinned, and the fake timers are told to advance with real time: the pin is what
-  // makes "in the future" and "in the past" this file's decision rather than the run day's, and the
-  // auto-advance is what lets Testing Library's and user-event's own timers still resolve instead of
-  // waiting on a clock that never moves.
-  vi.useFakeTimers({ now: PINNED_NOW, shouldAdvanceTime: true });
-  channel.permission = 'default';
-  channel.requestPermission.mockReset();
+  // A fresh module graph and a clean spy per case, then the clock: this file's instant, with the
+  // timers advancing at real time so React's asynchronous `act` and user-event's awaited
+  // interactions can settle — see the note on `shouldAdvanceTime` in the header.
+  vi.resetModules();
+  vi.clearAllMocks();
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(PINNED_NOW);
 });
 
 afterEach(() => {
+  // The globals a case stubbed are put back, so no case starts inside another's browser state: with
+  // no stub installed, the channel module reports the unsupported browser that jsdom provides.
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe('the markup the contract fixes', () => {
-  it('renders one form holding three labelled inputs and the Add reminder submit control', () => {
-    setup();
+  it('renders one form holding three labelled inputs and the Add reminder submit control', async () => {
+    await setup();
 
     expect(form()).toBeInTheDocument();
     expect(textField()).toBeInTheDocument();
@@ -173,8 +310,8 @@ describe('the markup the contract fixes', () => {
     expect(submitButton()).toBeInTheDocument();
   });
 
-  it('keeps the three field wrappers as the form\'s first three children, in the plan\'s order', () => {
-    setup();
+  it("keeps the three field wrappers as the form's first three children, in the plan's order", async () => {
+    await setup();
 
     // The stylesheet gives `.reminder-form__field:nth-child(2)` and `:nth-child(3)` the narrow basis
     // the date and time fields need, so the wrappers' positions are part of the visual contract.
@@ -188,8 +325,8 @@ describe('the markup the contract fixes', () => {
     expect(children[2]).toContainElement(timeField());
   });
 
-  it('leaves the text input without a maxLength, so the bound is the rule\'s and not the browser\'s', () => {
-    setup();
+  it("leaves the text input without a maxLength, so the bound is the rule's and not the browser's", async () => {
+    await setup();
 
     expect(textField()).not.toHaveAttribute('maxlength');
     expect(textField()).toHaveAttribute('type', 'text');
@@ -198,7 +335,7 @@ describe('the markup the contract fixes', () => {
   });
 
   it('counts what has been typed against the bound the rule measures against', async () => {
-    const { user } = setup();
+    const { user } = await setup();
 
     expect(screen.getByText(`0 of ${MAX_TEXT_LENGTH} characters`)).toBeInTheDocument();
 
@@ -207,12 +344,12 @@ describe('the markup the contract fixes', () => {
     expect(screen.getByText(`16 of ${MAX_TEXT_LENGTH} characters`)).toBeInTheDocument();
   });
 
-  it('reserves one message region per input, each announced without moving focus', () => {
-    setup();
+  it('reserves one message region per field, each announced without moving focus', async () => {
+    await setup();
 
-    const regions = document.querySelectorAll('.reminder-form__error');
+    const regions = messageRegions();
 
-    // Three, one per input, all present and empty: the reserved line is what keeps the row still
+    // Three, one per field, all present and empty: the reserved line is what keeps the row still
     // between an accepted and a rejected submit.
     expect(regions).toHaveLength(3);
     for (const region of regions) {
@@ -220,7 +357,8 @@ describe('the markup the contract fixes', () => {
       expect(region.textContent).toBe('');
     }
 
-    // Each control points at the region that describes it.
+    // Each control points at the region that describes it: the text field at its own, and both
+    // controls of the due-time pair at the one region their shared value is reported in.
     expect(textField()).toHaveAttribute('aria-describedby', regions[0]?.id ?? '');
     expect(dateField()).toHaveAttribute('aria-describedby', regions[2]?.id ?? '');
     expect(timeField()).toHaveAttribute('aria-describedby', regions[2]?.id ?? '');
@@ -228,30 +366,37 @@ describe('the markup the contract fixes', () => {
 });
 
 describe('a refused submission', () => {
-  it('reports empty text, focuses the text input and sends no request', async () => {
-    const { createMock, user } = setup();
+  it('reports empty text, focuses the field, associates the message with it and sends no request', async () => {
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup();
 
     await submit(user);
 
-    expect(screen.getByText(VALIDATION_MESSAGES.TEXT_REQUIRED)).toBeInTheDocument();
+    const message = screen.getByText(TEXT_REQUIRED);
+
+    expect(messageRegions()[0]?.textContent).toBe(TEXT_REQUIRED);
     expect(textField()).toHaveFocus();
     expect(textField()).toHaveAttribute('aria-invalid', 'true');
+    expect(textField()).toHaveAttribute('aria-describedby', message.id);
     expect(createMock).not.toHaveBeenCalled();
   });
 
   it('treats whitespace-only text as missing and sends no request', async () => {
-    const { createMock, user } = setup();
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup();
 
     await fill(user, '', FUTURE_DATE, FUTURE_TIME);
     await user.type(textField(), '   ');
     await submit(user);
 
-    expect(screen.getByText(VALIDATION_MESSAGES.TEXT_REQUIRED)).toBeInTheDocument();
+    expect(screen.getByText(TEXT_REQUIRED)).toBeInTheDocument();
+    expect(textField()).toHaveFocus();
     expect(createMock).not.toHaveBeenCalled();
   });
 
   it('refuses a text one character over the bound, and sends no request', async () => {
-    const { createMock, user } = setup();
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup();
 
     // Set directly rather than typed: the point of this case is the bound, and typing the bound plus
     // one character would spend the whole test's time budget on keystrokes.
@@ -260,13 +405,16 @@ describe('a refused submission', () => {
     fireEvent.change(timeField(), { target: { value: FUTURE_TIME } });
     await submit(user);
 
-    expect(screen.getByText(VALIDATION_MESSAGES.TEXT_TOO_LONG)).toBeInTheDocument();
+    const message = screen.getByText(TEXT_TOO_LONG);
+
     expect(textField()).toHaveFocus();
+    expect(textField()).toHaveAttribute('aria-describedby', message.id);
     expect(createMock).not.toHaveBeenCalled();
   });
 
-  it('accepts a text of exactly the bound and counts the trim, not the whitespace around it', async () => {
-    const { createMock, user } = setup();
+  it('accepts a text of exactly the bound and sends the trim, not the whitespace around it', async () => {
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup();
 
     await fill(user, '', FUTURE_DATE, FUTURE_TIME);
     fireEvent.change(textField(), { target: { value: `  ${'x'.repeat(MAX_TEXT_LENGTH)}  ` } });
@@ -277,12 +425,14 @@ describe('a refused submission', () => {
     });
 
     const sent = createMock.mock.calls[0]?.[0];
+
     expect(sent?.text).toBe('x'.repeat(MAX_TEXT_LENGTH));
-    expect(sent?.dueAt).toBe(toDueAtIso(FUTURE_DATE, FUTURE_TIME));
+    expect(sent?.dueAt).toBe(FUTURE_INSTANT);
   });
 
   it('sends exactly the text and the due instant, and nothing else', async () => {
-    const { createMock, user } = setup();
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup();
 
     await fill(user, 'Call the dentist', FUTURE_DATE, FUTURE_TIME);
     await submit(user);
@@ -292,68 +442,128 @@ describe('a refused submission', () => {
     });
 
     const sent = createMock.mock.calls[0]?.[0];
+
+    // The key set is asserted rather than sampled: a field the server derives must never leave the
+    // client, and this is the case that would notice one added here.
     expect(sent === undefined ? [] : Object.keys(sent).sort()).toEqual(['dueAt', 'text']);
+    expect(sent?.dueAt).toBe(FUTURE_INSTANT);
   });
 
-  it('reports a missing date and time and focuses the control the user has yet to fill', async () => {
-    const { createMock, user } = setup();
+  it('reports a missing date and time, focuses the control to fill in, and sends no request', async () => {
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup();
 
     await fill(user, 'Call the dentist', '', '');
     await submit(user);
 
-    expect(screen.getByText(VALIDATION_MESSAGES.DUE_AT_INVALID)).toBeInTheDocument();
+    const message = screen.getByText(DUE_AT_INVALID);
+
     expect(dateField()).toHaveFocus();
     expect(dateField()).toHaveAttribute('aria-invalid', 'true');
     expect(timeField()).toHaveAttribute('aria-invalid', 'true');
+
+    // The due date and the due time are one value in two controls, so the pair's one message is the
+    // message both of them point at.
+    expect(dateField()).toHaveAttribute('aria-describedby', message.id);
+    expect(timeField()).toHaveAttribute('aria-describedby', message.id);
     expect(createMock).not.toHaveBeenCalled();
   });
 
   it('focuses the time control when only the time is missing', async () => {
-    const { createMock, user } = setup();
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup();
 
     await fill(user, 'Call the dentist', FUTURE_DATE, '');
     await submit(user);
 
-    expect(screen.getByText(VALIDATION_MESSAGES.DUE_AT_INVALID)).toBeInTheDocument();
+    expect(screen.getByText(DUE_AT_INVALID)).toBeInTheDocument();
     expect(timeField()).toHaveFocus();
     expect(createMock).not.toHaveBeenCalled();
   });
 
-  it('reports a due time in the past and sends no request', async () => {
-    const { createMock, user } = setup();
+  it('reports the same message when a picker cannot hold what was entered', async () => {
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup();
+
+    await fill(user, 'Call the dentist', '', '');
+
+    // jsdom implements none of a date or time input's own editor and normalises a value the control
+    // cannot hold to the empty string, so an unusable value and an empty control are the same refusal
+    // — asserted here rather than papered over.
+    fireEvent.change(dateField(), { target: { value: 'not-a-date' } });
+    fireEvent.change(timeField(), { target: { value: '99:99' } });
+
+    expect(dateField()).toHaveValue('');
+    expect(timeField()).toHaveValue('');
+
+    await submit(user);
+
+    expect(screen.getByText(DUE_AT_INVALID)).toBeInTheDocument();
+    expect(dateField()).toHaveFocus();
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('reports a due time in the past, associates the message with the pair, and sends no request', async () => {
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup();
 
     await fill(user, 'Call the dentist', PAST_DATE, PAST_TIME);
     await submit(user);
 
-    expect(screen.getByText(VALIDATION_MESSAGES.DUE_AT_IN_PAST)).toBeInTheDocument();
+    const message = screen.getByText(DUE_AT_IN_PAST);
+
+    expect(timeField()).toHaveAttribute('aria-describedby', message.id);
     expect(createMock).not.toHaveBeenCalled();
   });
 
-  it('clears the message of the field being edited and leaves the other field untouched', async () => {
-    const { user } = setup();
+  it('clears the due-time message when one of its two controls is edited', async () => {
+    stubBrowserChannel('denied');
+    const { user } = await setup();
 
     await fill(user, 'Call the dentist', '', '');
     await submit(user);
-    expect(screen.getByText(VALIDATION_MESSAGES.DUE_AT_INVALID)).toBeInTheDocument();
+    expect(screen.getByText(DUE_AT_INVALID)).toBeInTheDocument();
 
     fireEvent.change(dateField(), { target: { value: FUTURE_DATE } });
 
-    expect(screen.queryByText(VALIDATION_MESSAGES.DUE_AT_INVALID)).not.toBeInTheDocument();
+    expect(screen.queryByText(DUE_AT_INVALID)).not.toBeInTheDocument();
     expect(dateField()).toHaveAttribute('aria-invalid', 'false');
+    expect(timeField()).toHaveAttribute('aria-invalid', 'false');
+  });
+
+  it('keeps a text message while a due-time control is edited', async () => {
+    stubBrowserChannel('denied');
+    const { user } = await setup();
+
+    await fill(user, '', FUTURE_DATE, FUTURE_TIME);
+    await submit(user);
+    expect(screen.getByText(TEXT_REQUIRED)).toBeInTheDocument();
+
+    fireEvent.change(dateField(), { target: { value: FUTURE_DATE } });
+    fireEvent.change(timeField(), { target: { value: FUTURE_TIME } });
+
+    // Editing a field the message does not belong to must not withdraw the refusal of the one it
+    // does: the user has still not said what the reminder is.
+    expect(screen.getByText(TEXT_REQUIRED)).toBeInTheDocument();
+    expect(textField()).toHaveAttribute('aria-invalid', 'true');
   });
 
   it('spends no permission request on a refused submission', async () => {
-    const { user } = setup();
+    // The reading that WOULD spend a request, so the assertion is about the refusal and not about a
+    // reading that had nothing to ask for.
+    stubBrowserChannel('default');
+    const { user } = await setup();
 
     await submit(user);
 
-    expect(channel.requestPermission).not.toHaveBeenCalled();
+    expect(permissionRequests).not.toHaveBeenCalled();
   });
 });
 
 describe('a successful create', () => {
   it('clears the three inputs and the message, and counts from zero again', async () => {
-    const { createMock, user } = setup();
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup();
 
     await fill(user, 'Call the dentist', FUTURE_DATE, FUTURE_TIME);
     await submit(user);
@@ -368,19 +578,19 @@ describe('a successful create', () => {
     expect(dateField()).toHaveValue('');
     expect(timeField()).toHaveValue('');
     expect(screen.getByText(`0 of ${MAX_TEXT_LENGTH} characters`)).toBeInTheDocument();
-    expect(document.querySelectorAll('.reminder-form__error')[0]?.textContent).toBe('');
+    for (const region of messageRegions()) {
+      expect(region.textContent).toBe('');
+    }
   });
 
-  it('asks for notification permission once, on the first submit, and never on load', async () => {
-    // The platform answers `granted`, which is what the real channel module records after a
-    // successful request; the second submit must therefore ask nothing.
-    channel.requestPermission.mockImplementation(() => {
-      channel.permission = 'granted';
-    });
+  it('asks for permission once, on the first successful submit, and never on load', async () => {
+    // The platform answers `granted`, which is what the real channel module reports once the request
+    // has been made, so the second submit has nothing left to ask for.
+    const channel = stubBrowserChannel('default', 'granted');
+    const { createMock, user } = await setup();
 
-    const { createMock, user } = setup();
-
-    expect(channel.requestPermission).not.toHaveBeenCalled();
+    expect(permissionRequests).not.toHaveBeenCalled();
+    expect(channel.platformRequests()).toBe(0);
 
     await fill(user, 'Call the dentist', FUTURE_DATE, FUTURE_TIME);
     await submit(user);
@@ -388,7 +598,11 @@ describe('a successful create', () => {
     await waitFor(() => {
       expect(createMock).toHaveBeenCalledTimes(1);
     });
-    expect(channel.requestPermission).toHaveBeenCalledTimes(1);
+
+    expect(permissionRequests).toHaveBeenCalledTimes(1);
+    // The real channel module reached the platform exactly once: the form asked, and the ask got
+    // through rather than being swallowed by a stand-in.
+    expect(channel.platformRequests()).toBe(1);
 
     await fill(user, 'Book the tickets', FUTURE_DATE, FUTURE_TIME);
     await submit(user);
@@ -396,19 +610,21 @@ describe('a successful create', () => {
     await waitFor(() => {
       expect(createMock).toHaveBeenCalledTimes(2);
     });
-    expect(channel.requestPermission).toHaveBeenCalledTimes(1);
+
+    expect(permissionRequests).toHaveBeenCalledTimes(1);
+    expect(channel.platformRequests()).toBe(1);
   });
 
-  it.each([
-    { permission: 'denied' as const },
-    { permission: 'granted' as const },
-    { permission: 'unsupported' as const },
-  ])(
-    'asks for permission under no reading but default (reading: $permission)',
-    async ({ permission }) => {
-      channel.permission = permission;
+  it.each(['denied', 'granted', 'unsupported'] as const)(
+    'asks for permission under no reading but default (reading: %s)',
+    async (reading) => {
+      // `unsupported` is the browser with no notification API at all, which is the state a case that
+      // installs no stub runs in — jsdom's own state.
+      if (reading !== 'unsupported') {
+        stubBrowserChannel(reading);
+      }
 
-      const { createMock, user } = setup();
+      const { createMock, user } = await setup();
 
       await fill(user, 'Call the dentist', FUTURE_DATE, FUTURE_TIME);
       await submit(user);
@@ -416,56 +632,70 @@ describe('a successful create', () => {
       await waitFor(() => {
         expect(createMock).toHaveBeenCalledTimes(1);
       });
-      expect(channel.requestPermission).not.toHaveBeenCalled();
+      expect(permissionRequests).not.toHaveBeenCalled();
     },
   );
 });
 
 describe('a failed create', () => {
   it('keeps every entered value and shows the server wording under the field it names', async () => {
-    const { createMock, user } = setup(async () => {
-      throw new ApiError(VALIDATION_MESSAGES.TEXT_TOO_LONG, 400, 'text');
-    });
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup(async () => failWith(SERVER_REFUSAL, 400, 'text'));
 
     await fill(user, 'Call the dentist', FUTURE_DATE, FUTURE_TIME);
     await submit(user);
 
     await waitFor(() => {
-      expect(screen.getByText(VALIDATION_MESSAGES.TEXT_TOO_LONG)).toBeInTheDocument();
+      expect(screen.getByText(SERVER_REFUSAL)).toBeInTheDocument();
     });
 
+    const message = screen.getByText(SERVER_REFUSAL);
+
     expect(createMock).toHaveBeenCalledTimes(1);
+    // Under the text field, not at form level and not under the due-time pair: the message is the
+    // server's and the field it belongs under is the one the server named.
+    expect(textField()).toHaveAttribute('aria-describedby', message.id);
+    expect(message.parentElement).toContainElement(textField());
+    expect(textField()).toHaveAttribute('aria-invalid', 'true');
+    // Three regions and no fourth: a failure the server attributed to an input is reported under that
+    // input rather than added at form level as well.
+    expect(messageRegions()).toHaveLength(3);
+    expect(messageRegions()[0]?.textContent).toBe(SERVER_REFUSAL);
+
+    // Every entered value survives a refused create: the form is never emptied on an assumption.
     expect(textField()).toHaveValue('Call the dentist');
     expect(dateField()).toHaveValue(FUTURE_DATE);
     expect(timeField()).toHaveValue(FUTURE_TIME);
-    expect(document.querySelectorAll('.reminder-form__error')[0]?.textContent).toBe(
-      VALIDATION_MESSAGES.TEXT_TOO_LONG,
-    );
   });
 
   it('shows a failure that names no field at form level, keeping the values', async () => {
-    const { user } = setup(async () => {
-      throw new ApiError(VALIDATION_MESSAGES.GENERIC_ERROR, 500);
-    });
+    stubBrowserChannel('denied');
+    const { user } = await setup(async () => failWith(GENERIC_ERROR, 500));
 
     await fill(user, 'Call the dentist', FUTURE_DATE, FUTURE_TIME);
     await submit(user);
 
     await waitFor(() => {
-      expect(screen.getByText(VALIDATION_MESSAGES.GENERIC_ERROR)).toBeInTheDocument();
+      expect(screen.getByText(GENERIC_ERROR)).toBeInTheDocument();
     });
 
-    // Form level: the message is the form's fourth message region, and neither input is accused.
-    expect(document.querySelectorAll('.reminder-form__error')).toHaveLength(4);
+    // Form level: the form's fourth message region, outside every field wrapper, and neither input
+    // is accused of anything.
+    const regions = messageRegions();
+    expect(regions).toHaveLength(4);
+    expect(regions.at(-1)?.textContent).toBe(GENERIC_ERROR);
     expect(textField()).toHaveAttribute('aria-invalid', 'false');
     expect(dateField()).toHaveAttribute('aria-invalid', 'false');
+    expect(timeField()).toHaveAttribute('aria-invalid', 'false');
+
     expect(textField()).toHaveValue('Call the dentist');
     expect(dateField()).toHaveValue(FUTURE_DATE);
     expect(timeField()).toHaveValue(FUTURE_TIME);
   });
 
   it('reports the generic wording for a failure that is not an ApiError, and keeps the values', async () => {
-    const { user } = setup(async () => {
+    stubBrowserChannel('denied');
+    const { user } = await setup(async () => {
       throw new Error('an unexpected failure');
     });
 
@@ -473,7 +703,7 @@ describe('a failed create', () => {
     await submit(user);
 
     await waitFor(() => {
-      expect(screen.getByText(VALIDATION_MESSAGES.GENERIC_ERROR)).toBeInTheDocument();
+      expect(screen.getByText(GENERIC_ERROR)).toBeInTheDocument();
     });
 
     // The raw error's own message is never shown: it is the one string that could carry something the
@@ -483,15 +713,14 @@ describe('a failed create', () => {
   });
 
   it('enables the submit control again after the failure', async () => {
-    const { user } = setup(async () => {
-      throw new ApiError(VALIDATION_MESSAGES.GENERIC_ERROR, 500);
-    });
+    stubBrowserChannel('denied');
+    const { user } = await setup(async () => failWith(GENERIC_ERROR, 500));
 
     await fill(user, 'Call the dentist', FUTURE_DATE, FUTURE_TIME);
     await submit(user);
 
     await waitFor(() => {
-      expect(screen.getByText(VALIDATION_MESSAGES.GENERIC_ERROR)).toBeInTheDocument();
+      expect(screen.getByText(GENERIC_ERROR)).toBeInTheDocument();
     });
 
     expect(submitButton()).toBeEnabled();
