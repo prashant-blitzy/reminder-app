@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reminders</title>
+    <!--
+      The client's HTML entry point: the document the bundler transforms into the built page at
+      client/dist/index.html, which the Express process serves statically and falls back to for every
+      other path. It is deliberately this small — a document shell, one mount element and one module
+      entry — because the whole interface is rendered by React into the element below, and none of it
+      lives here.
+
+      Two names are contracts with client/src/main.tsx, so neither may be adjusted to suit a caller:
+
+        id="root"      the element main.tsx looks up by that exact id and renders the screen into; it
+                       throws a named error when the element is missing.
+        /src/main.tsx  the module entry, root-absolute from the bundler's project root, which is this
+                       file's own directory.
+
+      What this document deliberately leaves out, each for a reason that holds wherever it is served
+      from:
+
+        - No stylesheet reference. The one stylesheet (client/src/styles.css) is imported by
+          client/src/main.tsx, so the bundler includes it in the build, fingerprints it and injects
+          the reference into the built page. A second reference here would be a competing path to the
+          same file.
+        - No external origin of any kind: no font, icon set, analytics, tag manager or third-party
+          asset. The built page must be servable from a single origin with no request leaving it, and
+          the project adds no external service.
+        - No data, no configuration object and no API base URL. The client reaches reminder data only
+          over /api, through one module, which in development the bundler's dev-server configuration
+          proxies to the same origin pattern production uses.
+        - No push or background-delivery plumbing and no worker registration: notifications are
+          delivered only while the page is open, and the channel this app uses is the page-scoped one.
+        - No storage bootstrap, no inline style, no inline script, no icon or web-app manifest and no
+          extra container element: none of them is part of what this screen does, and the accessible
+          regions, labels and live areas are the React components' responsibility rather than this
+          document's.
+    -->
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
