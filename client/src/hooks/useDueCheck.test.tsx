@@ -32,7 +32,6 @@ import { act, renderHook } from '@testing-library/react';
 import { useDueCheck } from './useDueCheck';
 import type { Reminder } from '../types';
 import { ApiError, type RemindersApi } from '../lib/remindersApi';
-import { VALIDATION_MESSAGES } from '../lib/validation';
 
 /**
  * The cadence the feature fixes, written as the literal the scheduler must honour: the check runs at
@@ -41,10 +40,24 @@ import { VALIDATION_MESSAGES } from '../lib/validation';
 const DUE_CHECK_INTERVAL_MS = 30_000;
 
 /**
- * The instant every test starts from, pinned into the faked clock. It carries an odd second and
- * millisecond so an instant read back verbatim is never mistaken for one that was rounded.
+ * The instant every test starts from, pinned into the faked clock.
+ *
+ * A literal rather than a reading of the clock, so every assertion in this file is reproducible at
+ * any hour of any day: the hook reads its one instant per run from the faked clock, and every
+ * fixture below is derived from this same value.
  */
 const NOW = '2026-10-07T12:00:00.000Z';
+
+/**
+ * The wording the banner shows for an unknown id, and for a failure that carried nothing readable.
+ *
+ * Written out as literals here rather than imported from the modules that produce them, because
+ * these two strings are what the assertions have to pin: a suite that compared the banner against
+ * the very constant the application renders from would keep passing while the words the user sees
+ * had changed. Each value is the one the server sends and the client displays.
+ */
+const NOT_FOUND_MESSAGE = 'Reminder not found.';
+const GENERIC_MESSAGE = 'Something went wrong. Please try again.';
 
 /**
  * The fakes this suite installs. `vi.hoisted` is required for a value a `vi.mock` factory closes
@@ -60,13 +73,16 @@ const {
   removeMock,
   currentInstantIsoMock,
 } = vi.hoisted(() => ({
-  notifyMock: vi.fn(),
-  listMock: vi.fn(),
-  markNotifiedMock: vi.fn(),
-  createMock: vi.fn(),
-  completeMock: vi.fn(),
-  removeMock: vi.fn(),
-  currentInstantIsoMock: vi.fn(),
+  // Each fake carries the signature of the collaborator it replaces rather than being an untyped
+  // stub, so the implementations installed below and the values they resolve are type-checked
+  // against the real contract instead of against `any`.
+  notifyMock: vi.fn<(reminder: Reminder) => void>(),
+  listMock: vi.fn<RemindersApi['list']>(),
+  markNotifiedMock: vi.fn<RemindersApi['markNotified']>(),
+  createMock: vi.fn<RemindersApi['create']>(),
+  completeMock: vi.fn<RemindersApi['complete']>(),
+  removeMock: vi.fn<RemindersApi['remove']>(),
+  currentInstantIsoMock: vi.fn<() => string>(),
 }));
 
 vi.mock('../lib/notifications', () => ({
@@ -124,11 +140,11 @@ function reminder(
  * for exactly that reason.
  */
 const testApi: RemindersApi = {
-  list: listMock as unknown as RemindersApi['list'],
-  create: createMock as unknown as RemindersApi['create'],
-  complete: completeMock as unknown as RemindersApi['complete'],
-  markNotified: markNotifiedMock as unknown as RemindersApi['markNotified'],
-  remove: removeMock as unknown as RemindersApi['remove'],
+  list: listMock,
+  create: createMock,
+  complete: completeMock,
+  markNotified: markNotifiedMock,
+  remove: removeMock,
 };
 
 /** Renders the hook over a list, returning the tools a case needs to change or tear it down. */
@@ -204,6 +220,29 @@ describe('the first run, against the list the screen already holds', () => {
     expect(result.current.error).toBeNull();
   });
 
+  it('notifies a reminder that came due before the page opened on the run that first sees it', async () => {
+    // The reload case the requirement is about: the page opened with no list of its own, so the run
+    // on mount selected nothing, and the reminder has been due for two hours by the time the screen's
+    // list arrives. There is no grace window and no recency check, so it is notified exactly once.
+    const overdue = reminder('overdue-on-open', atMinutes(-120));
+    const { rerender } = renderDueCheck();
+
+    await flush();
+    expect(notifyMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      rerender({ list: [overdue] });
+      await Promise.resolve();
+    });
+
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    expect(notifyMock).toHaveBeenCalledWith(overdue);
+    expect(markNotifiedMock).toHaveBeenCalledTimes(1);
+    expect(markNotifiedMock).toHaveBeenCalledWith('overdue-on-open');
+    // The arriving list is what triggered it: the argument path issues no request of its own.
+    expect(listMock).not.toHaveBeenCalled();
+  });
+
   it('notifies a reminder exactly on its due instant and leaves one a millisecond later alone', async () => {
     const exactlyDue = reminder('due-now', NOW);
     const aMillisecondLater = reminder('due-later', '2026-10-07T12:00:00.001Z');
@@ -223,6 +262,24 @@ describe('the first run, against the list the screen already holds', () => {
 
     await flush();
 
+    expect(notifyMock).not.toHaveBeenCalled();
+    expect(markNotifiedMock).not.toHaveBeenCalled();
+  });
+
+  it('notifies nothing on a later tick that still reports a completed, a claimed and an upcoming reminder', async () => {
+    // The same three refusals, exercised on the other path into the selection: a tick selects from
+    // the array the server has just returned, so the conditions have to hold there too.
+    const completed = reminder('done', atMinutes(-5), { completed: true });
+    const claimed = reminder('claimed', atMinutes(-5), { notifiedAt: atMinutes(-4) });
+    const upcoming = reminder('upcoming', atMinutes(5));
+    renderDueCheck([completed, claimed, upcoming]);
+
+    await flush();
+
+    listMock.mockResolvedValue([completed, claimed, upcoming]);
+    await advance(DUE_CHECK_INTERVAL_MS);
+
+    expect(listMock).toHaveBeenCalledTimes(1);
     expect(notifyMock).not.toHaveBeenCalled();
     expect(markNotifiedMock).not.toHaveBeenCalled();
   });
@@ -438,13 +495,13 @@ describe('the order of delivery and the claim', () => {
 describe('failures', () => {
   it('reports a failed claim and never retries that reminder in this session', async () => {
     const due = reminder('due-1', atMinutes(-1));
-    markNotifiedMock.mockRejectedValueOnce(new ApiError(VALIDATION_MESSAGES.NOT_FOUND, 404));
+    markNotifiedMock.mockRejectedValueOnce(new ApiError(NOT_FOUND_MESSAGE, 404));
     const { result } = renderDueCheck([due]);
 
     await flush();
 
     expect(notifyMock).toHaveBeenCalledTimes(1);
-    expect(result.current.error).toBe(VALIDATION_MESSAGES.NOT_FOUND);
+    expect(result.current.error).toBe(NOT_FOUND_MESSAGE);
 
     // The server still reports the reminder as unclaimed, and the check still refuses to alert again:
     // retrying would alert the user every 30 seconds for as long as the page stayed open.
@@ -458,7 +515,7 @@ describe('failures', () => {
   it('keeps notifying the remaining due reminders when one claim fails', async () => {
     const first = reminder('first', atMinutes(-2));
     const second = reminder('second', atMinutes(-1));
-    markNotifiedMock.mockRejectedValueOnce(new ApiError(VALIDATION_MESSAGES.GENERIC_ERROR, 500));
+    markNotifiedMock.mockRejectedValueOnce(new ApiError(GENERIC_MESSAGE, 500));
     const { result } = renderDueCheck([first, second]);
 
     await flush();
@@ -467,17 +524,17 @@ describe('failures', () => {
     expect(notifyMock).toHaveBeenNthCalledWith(1, first);
     expect(notifyMock).toHaveBeenNthCalledWith(2, second);
     expect(markNotifiedMock.mock.calls).toEqual([['first'], ['second']]);
-    expect(result.current.error).toBe(VALIDATION_MESSAGES.GENERIC_ERROR);
+    expect(result.current.error).toBe(GENERIC_MESSAGE);
   });
 
   it('reports a failed list read, claims nothing, and reads again on the next tick', async () => {
     const due = reminder('due-1', atMinutes(-1));
     const { result } = renderDueCheck();
-    listMock.mockRejectedValueOnce(new ApiError(VALIDATION_MESSAGES.GENERIC_ERROR, 503));
+    listMock.mockRejectedValueOnce(new ApiError(GENERIC_MESSAGE, 503));
 
     await advance(DUE_CHECK_INTERVAL_MS);
 
-    expect(result.current.error).toBe(VALIDATION_MESSAGES.GENERIC_ERROR);
+    expect(result.current.error).toBe(GENERIC_MESSAGE);
     expect(notifyMock).not.toHaveBeenCalled();
     expect(markNotifiedMock).not.toHaveBeenCalled();
 
@@ -493,11 +550,11 @@ describe('failures', () => {
 
     listMock.mockRejectedValueOnce({ reason: 'a rejection with no message' });
     await advance(DUE_CHECK_INTERVAL_MS);
-    expect(result.current.error).toBe(VALIDATION_MESSAGES.GENERIC_ERROR);
+    expect(result.current.error).toBe(GENERIC_MESSAGE);
 
     listMock.mockRejectedValueOnce(new Error(''));
     await advance(DUE_CHECK_INTERVAL_MS);
-    expect(result.current.error).toBe(VALIDATION_MESSAGES.GENERIC_ERROR);
+    expect(result.current.error).toBe(GENERIC_MESSAGE);
     expect(notifyMock).not.toHaveBeenCalled();
   });
 
@@ -505,10 +562,10 @@ describe('failures', () => {
     // The identity test that recognises `ApiError` can legitimately fail — a suite may substitute the
     // API module with its own equivalent class — and the message is still what the user should see.
     const { result } = renderDueCheck();
-    listMock.mockRejectedValueOnce(new Error(VALIDATION_MESSAGES.NOT_FOUND));
+    listMock.mockRejectedValueOnce(new Error(NOT_FOUND_MESSAGE));
 
     await advance(DUE_CHECK_INTERVAL_MS);
 
-    expect(result.current.error).toBe(VALIDATION_MESSAGES.NOT_FOUND);
+    expect(result.current.error).toBe(NOT_FOUND_MESSAGE);
   });
 });
