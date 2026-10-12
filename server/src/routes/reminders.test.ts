@@ -1,25 +1,29 @@
 /**
- * API tests for the reminder router.
+ * API tests for the reminder feature's HTTP surface.
  *
- * They drive `createRemindersRouter` over the real storage layer — an in-memory
- * database opened through `createDatabase` and wrapped by `createReminderStore`
- * — through supertest, so no port is bound, no fixture file is written and no
- * network is reached. The router is mounted exactly as `server/src/app.ts`
- * mounts it: the JSON parser, then the router at `/api`, then the error
- * middleware. The clock is a pinned accessor, which is what makes the
- * past-due refusal, the creation instant and the notification claim
- * deterministic: the router and the store read the same instant, so the whole
- * server-side picture of time is fixed by one value.
+ * They drive the assembled application — `createApp`, over a store built on an
+ * in-memory database opened through `createDatabase` and wrapped by
+ * `createReminderStore` — through supertest, so no port is bound, no fixture
+ * file is written and no network is reached. The subject is therefore the real
+ * composition rather than a second copy of it: the JSON body parser, the
+ * reminder router mounted at `/api`, the API's own refusal of a path no
+ * operation matched, and the error middleware, in the order
+ * `server/src/app.ts` assembles them. Nothing here rebuilds that chain, so this
+ * suite fails if the application is wired differently from the way it serves.
+ *
+ * The clock is a pinned accessor, which is what makes the past-due refusal, the
+ * creation instant and the notification claim deterministic: the application
+ * and the store read the same instant, so the whole server-side picture of time
+ * is fixed by one value rather than by when the suite happens to run.
  */
 
-import express from 'express';
+import type { Express } from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 
+import { createApp } from '../app';
 import { createDatabase } from '../data/database';
 import { createReminderStore, type ReminderStore } from '../data/reminderStore';
-import { errorHandler } from '../middleware/errorHandler';
-import { createRemindersRouter } from './reminders';
 import type { Reminder } from '../types';
 
 /** The instant every test's clock reports, and therefore every server-stamped field. */
@@ -34,18 +38,26 @@ const LATER_ISO = '2026-06-01T11:30:00.000Z';
 /** A due instant before {@link NOW_ISO}. */
 const PAST_ISO = '2026-05-31T10:00:00.000Z';
 
-/** The pinned clock: the router's `now` and the store's `now` are this one accessor. */
+/**
+ * One second after {@link NOW_ISO}: the closest instant the past-due rule
+ * accepts. Paired with the refusals at and behind the pinned instant, it is what
+ * shows the comparison is strictly-after and is made against the injected clock
+ * rather than the wall clock. Derived from the pinned instant so the two cannot
+ * drift apart.
+ */
+const JUST_AFTER_ISO = new Date(Date.parse(NOW_ISO) + 1_000).toISOString();
+
+/** The pinned clock: the application's `now` and the store's `now` are this one accessor. */
 const fixedNow = (): string => NOW_ISO;
 
-/** Mounts the router the way `server/src/app.ts` will, over the given store. */
-function buildApp(store: ReminderStore, now: () => string = fixedNow): express.Express {
-  const app = express();
-
-  app.use(express.json());
-  app.use('/api', createRemindersRouter({ store, now }));
-  app.use(errorHandler);
-
-  return app;
+/**
+ * Builds the application the way `server/src/index.ts` will, over the given
+ * store: the real `createApp`, so the parser, the `/api` mount, the unmatched
+ * API path's refusal and the error middleware under test are the ones the server
+ * serves with rather than a copy of them assembled here.
+ */
+function buildApp(store: ReminderStore, now: () => string = fixedNow): Express {
+  return createApp({ store, now });
 }
 
 /** A store over a fresh in-memory database, sharing the pinned clock. */
@@ -148,6 +160,35 @@ describe('POST /api/reminders', () => {
     expect(store.get(res.body.id)).toEqual(res.body);
   });
 
+  it('ignores body fields it does not recognise instead of refusing the request', async () => {
+    const app = buildApp(buildStore());
+
+    const res = await request(app).post('/api/reminders').send({
+      text: 'Buy a loaf of bread',
+      dueAt: FUTURE_ISO,
+      priority: 'high',
+      tags: ['shopping', 'today'],
+      nested: { anything: true },
+      completedAt: null,
+    });
+
+    // A create body carries exactly two fields that mean anything here; anything
+    // else is neither honoured nor grounds for a refusal, so the response is the
+    // ordinary six-field reminder and nothing an unknown field named leaks into
+    // it.
+    expect(res.status).toBe(201);
+    expect(Object.keys(res.body)).toEqual([
+      'id',
+      'text',
+      'dueAt',
+      'completed',
+      'notifiedAt',
+      'createdAt',
+    ]);
+    expect(res.body.text).toBe('Buy a loaf of bread');
+    expect(res.body.dueAt).toBe(FUTURE_ISO);
+  });
+
   it.each([
     ['an empty text', { text: '', dueAt: FUTURE_ISO }, 'Enter a reminder text.', 'text'],
     ['a whitespace-only text', { text: '   ', dueAt: FUTURE_ISO }, 'Enter a reminder text.', 'text'],
@@ -184,15 +225,16 @@ describe('POST /api/reminders', () => {
     message,
     field,
   ) => {
-    const store = buildStore();
-    const app = buildApp(store);
+    const app = buildApp(buildStore());
 
     const res = await request(app).post('/api/reminders').send(body);
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: message, field });
-    // Nothing was persisted: a refused input reaches no store call.
-    expect(store.list()).toEqual([]);
+    // Nothing was written and no partial state was left: the refused input never
+    // reached a statement, so the API's own list is still empty.
+    const listed = await request(app).get('/api/reminders');
+    expect(listed.body).toEqual([]);
   });
 
   it('accepts a text of exactly 280 characters', async () => {
@@ -204,6 +246,24 @@ describe('POST /api/reminders', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.text).toHaveLength(280);
+  });
+
+  it('accepts a due instant one second after the pinned instant', async () => {
+    const store = buildStore();
+    const app = buildApp(store);
+
+    const res = await request(app)
+      .post('/api/reminders')
+      .send({ text: 'Due this second', dueAt: JUST_AFTER_ISO });
+
+    // The refusal at the pinned instant itself is asserted above; one second
+    // later is the narrowest instant this rule accepts, and it is accepted
+    // because the comparison is made against the injected clock. A rule reading
+    // the wall clock would refuse this reminder, since the pinned instant is in
+    // the past relative to real time.
+    expect(res.status).toBe(201);
+    expect(res.body.dueAt).toBe(JUST_AFTER_ISO);
+    expect(store.list()).toHaveLength(1);
   });
 
   it('refuses a body that is not valid JSON with 400 and no field key', async () => {
@@ -430,7 +490,10 @@ describe('DELETE /api/reminders/:id', () => {
     expect(res.status).toBe(204);
     expect(res.text).toBe('');
     expect(store.get(created.body.id)).toBeUndefined();
-    expect(store.list()).toEqual([]);
+    // Gone from the API's own list too, so the removal is not merely a store-level
+    // fact: a read after it cannot resurrect the reminder.
+    const listed = await request(app).get('/api/reminders');
+    expect(listed.body).toEqual([]);
   });
 
   it('removes a completed reminder too', async () => {
@@ -469,5 +532,30 @@ describe('DELETE /api/reminders/:id', () => {
     expect(res.status).toBe(500);
     expect(res.body).toEqual(GENERIC_FAILURE_BODY);
     expect(JSON.stringify(res.body)).not.toContain('storage unavailable');
+  });
+});
+
+describe('the /api mount', () => {
+  it('refuses a path no operation matched with the API error body, not a page', async () => {
+    const res = await request(buildApp(buildStore())).get('/api/no-such-operation');
+
+    // Every non-2xx response this API sends carries the one body shape, so a path
+    // under the API prefix that no operation claims is refused in that vocabulary
+    // rather than falling through to the HTML document Express sends by default.
+    expect(res.status).toBe(404);
+    expect(res.type).toBe('application/json');
+    expect(res.body).toEqual({ error: 'Reminder not found.' });
+  });
+
+  it('refuses an unmatched path under the API prefix whatever the method', async () => {
+    const app = buildApp(buildStore());
+
+    const posted = await request(app).post('/api/reminders/anything/else');
+    const removed = await request(app).delete('/api/reminders');
+
+    expect(posted.status).toBe(404);
+    expect(posted.body).toEqual({ error: 'Reminder not found.' });
+    expect(removed.status).toBe(404);
+    expect(removed.body).toEqual({ error: 'Reminder not found.' });
   });
 });
