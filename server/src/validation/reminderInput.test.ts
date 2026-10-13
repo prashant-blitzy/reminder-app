@@ -185,6 +185,14 @@ describe('validateReminderInput — rule 1: the text must exist and must not be 
     expectRejection('buy milk', NOW_ISO, 'text', 'Enter a reminder text.');
   });
 
+  it('rejects a string body that spells the field name', () => {
+    expectRejection('text', NOW_ISO, 'text', 'Enter a reminder text.');
+  });
+
+  it('rejects an empty array body', () => {
+    expectRejection([], NOW_ISO, 'text', 'Enter a reminder text.');
+  });
+
   it('rejects an array body', () => {
     expectRejection([{ text: 'buy milk', dueAt: FUTURE_ISO }], NOW_ISO, 'text', 'Enter a reminder text.');
   });
