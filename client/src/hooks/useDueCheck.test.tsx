@@ -9,25 +9,27 @@
  *
  * Three substitutions make it deterministic, and none of them touches a real collaborator:
  *
- * - The clock and the timers are faked (`vi.useFakeTimers` with `vi.setSystemTime`). The clock seam
- *   is the faked system clock, which the hook reads through `currentInstantIso` in `../lib/time` —
- *   the module is mocked here ONLY to count those reads, and its implementation still returns the
- *   faked clock's instant, so the values under test are real. No clock parameter is added to the
- *   hook: it reads the accessor and passes the result down.
+ * - The clock and the timers are faked (`vi.useFakeTimers` with `vi.setSystemTime`). That faked
+ *   system clock is the whole clock seam: the hook's real accessor (`currentInstantIso` in
+ *   `../lib/time`) reads it, so this suite neither imports nor mocks that module, and no clock
+ *   parameter is added to the hook. Pinning the system clock pins every instant the hook decides
+ *   against and reports as `now`.
  * - The channel is mocked (`../lib/notifications`), so the suite observes that a reminder was
  *   notified without constructing a browser notification. The channel's own behaviour — which
  *   readings permit a browser notification, and what the in-app alert does — is tested in
  *   `client/src/lib/notifications.test.ts`.
- * - The API layer is mocked (`../lib/remindersApi`), so no test reaches the network. The real
- *   `ApiError` class is kept from that module, so a failure thrown at the hook is the type the
- *   application really throws, and its message is the one the banner would render.
+ * - The API layer is a set of fakes handed to the hook through its `api` parameter, so no test
+ *   reaches the network. The module itself is mocked only to keep the real `ApiError` class — a
+ *   failure thrown at the hook is the type the application really throws — and to replace its own
+ *   `remindersApi` caller with a tripwire that rejects, so a hook that ignored the injected API would
+ *   fail these assertions instead of quietly reaching the real caller.
  *
  * The due condition and the status classification are NOT mocked: `../lib/dueCheck` is the real
  * pure rule, so these tests exercise the integration between the hook's cadence and the rule that
  * decides what is due.
  */
 
-import { act, renderHook } from '@testing-library/react';
+import { act, cleanup, renderHook } from '@testing-library/react';
 
 import { useDueCheck } from './useDueCheck';
 import type { Reminder } from '../types';
@@ -64,48 +66,44 @@ const GENERIC_MESSAGE = 'Something went wrong. Please try again.';
  * over: the factories are hoisted above the imports, so an ordinary module-scope `const` would not
  * exist yet when they run.
  */
-const {
-  notifyMock,
-  listMock,
-  markNotifiedMock,
-  createMock,
-  completeMock,
-  removeMock,
-  currentInstantIsoMock,
-} = vi.hoisted(() => ({
-  // Each fake carries the signature of the collaborator it replaces rather than being an untyped
-  // stub, so the implementations installed below and the values they resolve are type-checked
-  // against the real contract instead of against `any`.
-  notifyMock: vi.fn<(reminder: Reminder) => void>(),
-  listMock: vi.fn<RemindersApi['list']>(),
-  markNotifiedMock: vi.fn<RemindersApi['markNotified']>(),
-  createMock: vi.fn<RemindersApi['create']>(),
-  completeMock: vi.fn<RemindersApi['complete']>(),
-  removeMock: vi.fn<RemindersApi['remove']>(),
-  currentInstantIsoMock: vi.fn<() => string>(),
-}));
+const { notifyMock, listMock, markNotifiedMock, createMock, completeMock, removeMock } =
+  vi.hoisted(() => ({
+    // Each fake carries the signature of the collaborator it replaces rather than being an untyped
+    // stub, so the implementations installed below and the values they resolve are type-checked
+    // against the real contract instead of against `any`.
+    notifyMock: vi.fn<(reminder: Reminder) => void>(),
+    listMock: vi.fn<RemindersApi['list']>(),
+    markNotifiedMock: vi.fn<RemindersApi['markNotified']>(),
+    createMock: vi.fn<RemindersApi['create']>(),
+    completeMock: vi.fn<RemindersApi['complete']>(),
+    removeMock: vi.fn<RemindersApi['remove']>(),
+  }));
 
 vi.mock('../lib/notifications', () => ({
   notify: notifyMock,
 }));
 
-vi.mock('../lib/time', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../lib/time')>();
-  return { ...actual, currentInstantIso: currentInstantIsoMock };
-});
-
 vi.mock('../lib/remindersApi', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/remindersApi')>();
-  return {
-    ...actual,
-    remindersApi: {
-      list: listMock,
-      create: createMock,
-      complete: completeMock,
-      markNotified: markNotifiedMock,
-      remove: removeMock,
-    },
+
+  // The module's own caller is replaced by a tripwire rather than by this suite's fakes. The fakes
+  // reach the hook only through its `api` parameter, so every assertion on them also proves the hook
+  // used the API it was handed; and a hook that fell back to the module's caller instead gets a
+  // rejection, which surfaces as an unexpected `error` and as fakes that were never called, never as
+  // a request leaving the test.
+  const unreachable = (): Promise<never> =>
+    Promise.reject(
+      new Error('The module remindersApi was reached; the hook must use the API it was handed.'),
+    );
+  const tripwire: RemindersApi = {
+    list: unreachable,
+    create: unreachable,
+    complete: unreachable,
+    markNotified: unreachable,
+    remove: unreachable,
   };
+
+  return { ...actual, remindersApi: tripwire };
 });
 
 /** The absolute instant a number of minutes from `NOW` falls on, as the server would report it. */
@@ -183,16 +181,20 @@ beforeEach(() => {
 
   vi.clearAllMocks();
 
-  // The accessor returns the faked clock's instant, so every value under test is still real.
-  currentInstantIsoMock.mockImplementation(() => new Date().toISOString());
   listMock.mockResolvedValue([]);
-  markNotifiedMock.mockImplementation(async (id: string) => reminder(id, NOW));
+  // The claim answers as the server does: the updated reminder, with `notifiedAt` now set.
+  markNotifiedMock.mockImplementation(async (id: string) => reminder(id, NOW, { notifiedAt: NOW }));
   createMock.mockImplementation(async () => reminder('created', atMinutes(5)));
   completeMock.mockImplementation(async (id: string) => reminder(id, NOW, { completed: true }));
   removeMock.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
+  // Unmount first, while the fake timers are still installed, so each hook's interval is cleared on
+  // the clock that scheduled it. Done explicitly rather than left to Testing Library's automatic
+  // cleanup, which registers itself once per module load: a runner that shares modules between
+  // files would otherwise leave this file's hooks mounted from one case into the next.
+  cleanup();
   vi.useRealTimers();
 });
 
@@ -338,6 +340,52 @@ describe('the scheduler', () => {
     expect(result.current.error).toBeNull();
   });
 
+  it('notifies once when the list arrives, stays silent on a stale tick, and stays silent after a remount once the claim is recorded', async () => {
+    const due = reminder('due-1', atMinutes(-1));
+    const firstSession = renderDueCheck();
+
+    await flush();
+    expect(notifyMock).not.toHaveBeenCalled();
+
+    // The screen's list arrives: the argument path notifies and claims, and issues no request.
+    await act(async () => {
+      firstSession.rerender({ list: [due] });
+      await Promise.resolve();
+    });
+
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    expect(notifyMock).toHaveBeenCalledWith(due);
+    expect(markNotifiedMock).toHaveBeenCalledTimes(1);
+    expect(markNotifiedMock).toHaveBeenCalledWith('due-1');
+    expect(listMock).not.toHaveBeenCalled();
+    expect(firstSession.result.current.now).toBe(NOW);
+
+    // Thirty seconds on, the tick reads a snapshot that still reports the reminder unclaimed. Only
+    // the session's own claim set can keep this tick silent; the server's column is not set in it.
+    listMock.mockResolvedValue([due]);
+    await advance(DUE_CHECK_INTERVAL_MS);
+
+    expect(listMock).toHaveBeenCalledTimes(1);
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    expect(markNotifiedMock).toHaveBeenCalledTimes(1);
+
+    // The reload: a new hook instance, and so a new, empty session set, over the list as the server
+    // now holds it. Here the recorded `notifiedAt` is the only thing that can keep it silent, on the
+    // argument path and on the tick alike.
+    firstSession.unmount();
+    const claimed = reminder('due-1', atMinutes(-1), { notifiedAt: NOW });
+    listMock.mockResolvedValue([claimed]);
+    const secondSession = renderDueCheck([claimed]);
+
+    await flush();
+    await advance(DUE_CHECK_INTERVAL_MS);
+
+    expect(listMock).toHaveBeenCalledTimes(2);
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    expect(markNotifiedMock).toHaveBeenCalledTimes(1);
+    expect(secondSession.result.current.error).toBeNull();
+  });
+
   it('refreshes `now` with the clock read of each run', async () => {
     const { result } = renderDueCheck();
 
@@ -346,21 +394,6 @@ describe('the scheduler', () => {
     await advance(DUE_CHECK_INTERVAL_MS);
 
     expect(result.current.now).toBe('2026-10-07T12:00:30.000Z');
-  });
-
-  it('reads the wall clock exactly once per run, so one decision comes from one instant', async () => {
-    const due = reminder('due-1', atMinutes(-1));
-    renderDueCheck([due]);
-
-    await flush();
-
-    // The initial value of `now`, plus the one read the run that notified the reminder took.
-    expect(currentInstantIsoMock).toHaveBeenCalledTimes(2);
-
-    currentInstantIsoMock.mockClear();
-    await advance(DUE_CHECK_INTERVAL_MS);
-
-    expect(currentInstantIsoMock).toHaveBeenCalledTimes(1);
   });
 
   it('issues exactly one request per tick however many reminders are stored', async () => {
