@@ -56,7 +56,10 @@
   /* Flex bases that make the wrapping rows narrow gracefully */
   --text-basis: 12rem;
   --field-basis-text: 15rem;
-  --field-basis-date: 8rem;
+  /* 10rem, not narrower: the platform date and time pickers render the full value plus
+     their picker indicator inside the input's padding, and at 8rem Chrome clipped a
+     filled date to "10/14/202" and a filled time to "11:00 AN". */
+  --field-basis-date: 10rem;
 
   /* Spacing scale, used for padding, gaps and margins alike */
   --space-1: 0.25rem;
