@@ -42,8 +42,10 @@
  * `role="alert"` region, so a screen reader announces the failure as it appears; the retry control
  * is a real `<button type="button">` and is therefore focusable and operable from the keyboard; and
  * every row is a real list item inside the real `<ul>` below, so the list's structure, its reading
- * order and its focus order all come from the platform. The empty and loading messages are text in
- * the document, never a colour or a shape alone.
+ * order and its focus order all come from the platform. The one attribute added on top of the
+ * elements is an explicit `role="list"` on that `<ul>`, which keeps the list announced as a list in
+ * Safari with VoiceOver once the stylesheet has removed its markers. The empty and loading messages
+ * are text in the document, never a colour or a shape alone.
  *
  * The class names are a fixed contract shared with `client/src/styles.css`, which carries a rule
  * for every one of them: `reminder-list`, `error-banner`, `error-banner__message`,
@@ -159,9 +161,15 @@ export function ReminderList({
       ) : null}
 
       {/* 4. The rows, in the order they arrived. Rendered independently of the banner, so a failed
-          complete or delete leaves the list the user already has on screen. */}
+          complete or delete leaves the list the user already has on screen.
+
+          The `role="list"` is redundant in HTML terms and is kept on purpose: the stylesheet removes
+          this list's markers (`list-style: none`), and Safari with VoiceOver then drops the list and
+          list-item semantics of a list that is not inside a `<nav>`. The explicit role restores them
+          there and changes nothing in other browsers, so a validator's redundant-role warning on
+          this line is expected and must not lead to its removal. */}
       {hasReminders ? (
-        <ul className="reminder-list__items">
+        <ul className="reminder-list__items" role="list">
           {reminders.map((reminder) => (
             <ReminderItem
               key={reminder.id}
@@ -178,11 +186,11 @@ export function ReminderList({
 }
 
 /**
- * Default export of the same component, for the import form the application shell may use.
+ * Default export of the same component, beside the named one.
  *
- * The shell that mounts this list (`client/src/App.tsx`) is written from a separate brief and did
- * not exist when this file was implemented, so the import form it will use could not be read from
- * the tree. Exporting both forms keeps either one working without an edit here; both resolve to the
- * single implementation above, so there is no second component to keep in step.
+ * The application shell (`client/src/App.tsx`) and this component's suite import the named
+ * `ReminderList`; the default form is kept so this component offers the same two import forms as its
+ * sibling regions `NotificationBanner` and `ReminderForm`. Both resolve to the single implementation
+ * above, so there is no second component to keep in step.
  */
 export default ReminderList;
