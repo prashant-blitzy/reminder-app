@@ -253,7 +253,11 @@ describe('selectDueReminders and classify — offset-bearing and unreadable due 
   // cases marked below as traps, and misordering is not cosmetic: it would postpone a past
   // reminder's notification for good, or fire a future reminder's early.
 
-  /** 12:00 in a +02:00 zone is 10:00 UTC — two hours before NOW. */
+  /**
+   * 12:00 in a +02:00 zone is 10:00 UTC — two hours before NOW. As text it also sorts before NOW
+   * (`+` precedes `.`), so it is due under either comparison and cannot by itself expose a text
+   * comparison; the two trap constants below are the ones that sort on the wrong side of NOW.
+   */
   const OFFSET_ALREADY_DUE = '2026-10-07T12:00:00+02:00';
 
   /** 13:00 in a +05:00 zone is 08:00 UTC — four hours before NOW, yet later than NOW as text. */
