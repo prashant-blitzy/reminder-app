@@ -21,14 +21,14 @@
  *   - It never reads the wall clock. The store takes its time from an accessor,
  *     and the accessor here returns a value this file owns and moves on purpose,
  *     so a creation instant and a claim's instant are asserted exactly rather
- *     than approximately. `Date.now()` and `new Date()` appear nowhere below, and
- *     no assertion depends on how long anything took.
+ *     than approximately. No reading of the process clock appears below, and no
+ *     assertion depends on how long anything took.
  *   - It runs against an in-memory database, or against a file inside a
  *     directory this file creates under the system temp directory and removes
  *     afterwards. It never opens the documented development database, and it
  *     leaves nothing behind under `server/data/`.
  *   - It touches no network and needs no server. The driver is synchronous and
- *     in-process, no listening socket is opened, and no fixture file is
+ *     in-process, no socket or port is ever opened, and no fixture file is
  *     committed to the repository.
  */
 
@@ -503,7 +503,6 @@ describe('get', () => {
   });
 });
 
-
 describe('complete', () => {
   it('returns the reminder marked complete, as a boolean', () => {
     const { store } = openInMemoryHarness();
@@ -689,7 +688,6 @@ describe('remove', () => {
     expect(store.get(kept.id)?.notifiedAt).toBe(PINNED_NOW);
   });
 });
-
 
 describe('durability across a reopen — a stored reminder survives a restart', () => {
   it('reads the row back, unchanged, after the database file is closed and reopened', () => {
