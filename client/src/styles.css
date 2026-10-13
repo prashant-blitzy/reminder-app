@@ -257,10 +257,15 @@ input {
 /* -------------------------------------------------------------------------- *
  * Create form: reminder text, due date and due time, each with its message.   *
  * -------------------------------------------------------------------------- */
+/* The fields are top-aligned, not bottom-aligned. Each field is label, input, message, and
+   a message can run past its reserved line (two or three lines under the narrow due-time
+   input), so bottom alignment would lift that field's input above its neighbours and split
+   the date and time pair on every due-time rejection. Top alignment keeps the three inputs
+   on one line whatever any message below them holds. */
 .reminder-form {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: var(--space-3);
   padding: var(--space-4);
   background-color: var(--color-surface);
@@ -327,6 +332,13 @@ input {
   color: var(--color-danger);
   border-inline-start: var(--mark-width) solid var(--color-danger);
   font-weight: var(--font-weight-semibold);
+}
+
+/* The form-level message - the one that is the form's own child rather than a field's -
+   shares the submit control's line, so it is centred on that line instead of hanging
+   from the top of the taller control. */
+.reminder-form > .reminder-form__error {
+  align-self: center;
 }
 
 .reminder-form__submit {

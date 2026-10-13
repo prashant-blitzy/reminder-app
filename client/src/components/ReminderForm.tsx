@@ -41,14 +41,18 @@
  *    waits on a prompt.
  * 5. Otherwise the create request is awaited: success clears the three inputs, and any failure keeps
  *    every entered value in place and shows the server's own wording, because the screen must never
- *    present an unsaved reminder as saved.
+ *    present an unsaved reminder as saved. A failure the server attributed to an input focuses that
+ *    input, exactly as a pre-flight refusal does.
  *
  * The form is deliberately usable before any style is applied: three labelled inputs inside a real
- * `<form>`, a submit button, a live count of the text, and one message region per input that is always
- * in the document. The messages are polite live regions and each control points at the message that
- * describes it through `aria-describedby`, so a refusal is announced without the user having to go
- * looking for it; a rejected submit also focuses the first control the user has to correct, so the
- * correction path and the focus order agree.
+ * `<form>`, a submit button, a live count of the text, one message region per input and one at form
+ * level, all of them always in the document. The messages are polite live regions and each control
+ * points at the message that describes it through `aria-describedby`, so a refusal is announced
+ * without the user having to go looking for it; a rejected submit — refused here or by the server —
+ * also focuses the first control the user has to correct, so the correction path and the focus order
+ * agree. Any other outcome of a submit made from the "Add reminder" control leaves focus on that
+ * control, even though it is disabled while the request is on the wire and the browser drops the
+ * focus of a disabled control.
  *
  * The class names are the fixed vocabulary `client/src/styles.css` carries a rule for:
  * `reminder-form`, `reminder-form__field`, `reminder-form__label`, `reminder-form__input`,
@@ -59,7 +63,7 @@
  * not one of them.
  */
 
-import { useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { ChangeEvent, FormEvent, JSX } from 'react';
 
 import { getChannelSnapshot, requestPermission } from '../lib/notifications';
@@ -139,7 +143,8 @@ function rejectionFrom(error: unknown): Rejection {
  *
  * @param props The one thing this form delegates to: the parent's create call.
  * @returns The form: the three labelled inputs with their message lines, the live character count,
- *   the `Add reminder` submit control, and — when a failure named no input — one form-level message.
+ *   the `Add reminder` submit control, and the form-level message line, which carries text only when
+ *   a failure named no input.
  */
 export function ReminderForm({ create }: ReminderFormProps): JSX.Element {
   // The three values the user has typed, exactly as typed: the text untrimmed (the rule trims it) and
@@ -166,6 +171,29 @@ export function ReminderForm({ create }: ReminderFormProps): JSX.Element {
   // Guards against a second submit arriving before React has re-rendered the disabled button — an
   // Enter key press in a text input can submit the form without the button being activated again.
   const submitInFlight = useRef(false);
+
+  // The submit control, and whether focus is owed back to it once the request settles. Disabling a
+  // focused control makes the browser drop its focus to the document body, which leaves a keyboard
+  // or screen-reader user nowhere after activating "Add reminder". The flag records that the control
+  // held focus when the request started; it is cleared when a refusal sends focus to a field instead.
+  const submitControl = useRef<HTMLButtonElement>(null);
+  const refocusSubmitControl = useRef(false);
+
+  // Returns focus to the submit control once it is enabled again — which is the earliest moment it
+  // can take focus — but only when the browser dropped focus while it was disabled. Focus the user
+  // moved somewhere else during the request is theirs, and is left where they put it.
+  useEffect(() => {
+    if (submitting || !refocusSubmitControl.current) {
+      return;
+    }
+
+    refocusSubmitControl.current = false;
+
+    const focused = document.activeElement;
+    if (focused === null || focused === document.body || focused === submitControl.current) {
+      submitControl.current?.focus();
+    }
+  }, [submitting]);
 
   // The unique prefix for this form's control and message ids, so the label associations and the
   // `aria-describedby` references stay correct even if two forms are ever mounted together.
@@ -252,7 +280,8 @@ export function ReminderForm({ create }: ReminderFormProps): JSX.Element {
    * exists, so nothing is saved and the user is left standing on the field that needs fixing.
    *
    * A failed create keeps every entered value: the user's text, date and time survive, and the
-   * server's own message is shown under the input it named (or at form level when it named none).
+   * server's own message is shown under the input it named, with that input focused (or at form level,
+   * with focus kept on the submit control, when it named none).
    *
    * @param event The form's submit event.
    */
@@ -287,6 +316,10 @@ export function ReminderForm({ create }: ReminderFormProps): JSX.Element {
     }
 
     submitInFlight.current = true;
+    // Read before the control is disabled: only a submit made from the control itself owes focus back
+    // to it. A submit made by pressing Enter in a field keeps focus in that field throughout.
+    refocusSubmitControl.current =
+      submitControl.current !== null && document.activeElement === submitControl.current;
     setSubmitting(true);
 
     try {
@@ -301,7 +334,18 @@ export function ReminderForm({ create }: ReminderFormProps): JSX.Element {
     } catch (error) {
       // The values stay exactly as the user left them, and the message is the server's own wording,
       // attributed to the input the server named.
-      setRejection(rejectionFrom(error));
+      const failure = rejectionFrom(error);
+      setRejection(failure);
+
+      // A server refusal of an input is a rejected submit like a pre-flight one, so it moves focus to
+      // the control to correct in the same way, and the submit control is then owed nothing. A
+      // failure that names no input sends the user to no field: focus stays on — or, when the
+      // disabled control dropped it, returns to — the submit control, right beside the form-level
+      // message, which its live region announces.
+      if (failure.field !== undefined) {
+        refocusSubmitControl.current = false;
+        focusField(failure.field);
+      }
     } finally {
       submitInFlight.current = false;
       setSubmitting(false);
@@ -387,17 +431,25 @@ export function ReminderForm({ create }: ReminderFormProps): JSX.Element {
         {text.length} of {MAX_TEXT_LENGTH} characters
       </p>
 
-      <button className="reminder-form__submit" type="submit" disabled={submitting}>
+      <button
+        className="reminder-form__submit"
+        ref={submitControl}
+        type="submit"
+        disabled={submitting}
+      >
         Add reminder
       </button>
 
       {/* A failure the server attributed to no input — an unreachable server, an unreadable body, a
-          storage failure — is shown here rather than pointed at a field it has nothing to do with. */}
-      {formMessage === '' ? null : (
-        <p className="reminder-form__error" aria-live="polite">
-          {formMessage}
-        </p>
-      )}
+          storage failure — is shown here rather than pointed at a field it has nothing to do with.
+          The region stays in the document while empty, like the three field regions: a polite live
+          region inserted already holding its text is not reliably announced, and this is the one
+          message no focus move accompanies, so the region must exist before its text arrives. Empty,
+          it is a zero-width item beside the submit control, shorter than the control, so reserving it
+          moves nothing on screen. */}
+      <p className="reminder-form__error" aria-live="polite">
+        {formMessage}
+      </p>
     </form>
   );
 }

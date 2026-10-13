@@ -17,8 +17,9 @@
  * - The one permission request this application spends: none on mount, exactly one on the first
  *   successful submit from a `default` reading, none afterwards, and none at all from any other
  *   reading.
- * - The failure path: the server's own wording under the input the server named (or at form level
- *   when it named none) with every entered value kept, and the submit control usable again.
+ * - The failure path: the server's own wording under the input the server named, with that input
+ *   focused (or at form level, with focus left alone, when it named none), every entered value kept,
+ *   and the submit control usable again.
  *
  * The substitutions, and why each is the one that makes the evidence real:
  *
@@ -234,8 +235,9 @@ function form(): HTMLFormElement {
 }
 
 /**
- * The form's message regions in document order: the text field's, the due-time pair's — which covers
- * both of its controls — and, when a failure named no input at all, a fourth at form level.
+ * The form's message regions in document order: the text field's, the date control's reserved line,
+ * the due-time pair's — which sits under the time control and covers both controls of the pair — and
+ * the form-level one, for a failure that names no input. All four are always in the document.
  */
 function messageRegions(): HTMLElement[] {
   return Array.from(document.querySelectorAll<HTMLElement>('.reminder-form__error'));
@@ -274,6 +276,18 @@ async function fill(
   }
   if (time !== '') {
     fireEvent.change(timeField(), { target: { value: time } });
+  }
+}
+
+/**
+ * Drops focus to the document body, as Chrome does when the focused submit control is disabled for
+ * the duration of a request. jsdom does not drop the focus of a disabled control itself, so a create
+ * stub calls this to put the page in the state a real browser leaves it in.
+ */
+function dropFocusLikeABrowser(): void {
+  const focused = document.activeElement;
+  if (focused instanceof HTMLElement) {
+    focused.blur();
   }
 }
 
@@ -344,18 +358,22 @@ describe('the markup the contract fixes', () => {
     expect(screen.getByText(`16 of ${MAX_TEXT_LENGTH} characters`)).toBeInTheDocument();
   });
 
-  it('reserves one message region per field, each announced without moving focus', async () => {
+  it('reserves one message region per field and one at form level, each announced without moving focus', async () => {
     await setup();
 
     const regions = messageRegions();
 
-    // Three, one per field, all present and empty: the reserved line is what keeps the row still
-    // between an accepted and a rejected submit.
-    expect(regions).toHaveLength(3);
+    // Four, one per field and one at form level, all present and empty before anything has been
+    // refused: the reserved line is what keeps the row still between an accepted and a rejected
+    // submit, and a live region has to exist before its text arrives for that text to be announced.
+    expect(regions).toHaveLength(4);
     for (const region of regions) {
       expect(region).toHaveAttribute('aria-live', 'polite');
       expect(region.textContent).toBe('');
     }
+
+    // The form-level region belongs to no field: it is the form's own child, outside every wrapper.
+    expect(regions[3]?.parentElement).toBe(form());
 
     // Each control points at the region that describes it: the text field at its own, and both
     // controls of the due-time pair at the one region their shared value is reported in.
@@ -560,6 +578,100 @@ describe('a refused submission', () => {
   });
 });
 
+describe('focus once a request from the submit control settles', () => {
+  it('returns focus to the submit control after a success, when the browser dropped it', async () => {
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup(async (input) => {
+      dropFocusLikeABrowser();
+      return makeReminder(input);
+    });
+
+    await fill(user, 'Call the dentist', FUTURE_DATE, FUTURE_TIME);
+    await submit(user);
+
+    await waitFor(() => {
+      expect(textField()).toHaveValue('');
+    });
+
+    expect(createMock).toHaveBeenCalledTimes(1);
+    expect(submitButton()).toBeEnabled();
+    expect(submitButton()).toHaveFocus();
+  });
+
+  it('returns focus to the submit control after a failure that names no input', async () => {
+    stubBrowserChannel('denied');
+    const { user } = await setup(async () => {
+      dropFocusLikeABrowser();
+      return failWith(GENERIC_ERROR, 500);
+    });
+
+    await fill(user, 'Call the dentist', FUTURE_DATE, FUTURE_TIME);
+    await submit(user);
+
+    await waitFor(() => {
+      expect(screen.getByText(GENERIC_ERROR)).toBeInTheDocument();
+    });
+
+    expect(submitButton()).toHaveFocus();
+    expect(textField()).toHaveValue('Call the dentist');
+  });
+
+  it('sends focus to the named input, not back to the control, after a refusal of that input', async () => {
+    stubBrowserChannel('denied');
+    const { user } = await setup(async () => {
+      dropFocusLikeABrowser();
+      return failWith(SERVER_REFUSAL, 400, 'text');
+    });
+
+    await fill(user, 'Call the dentist', FUTURE_DATE, FUTURE_TIME);
+    await submit(user);
+
+    await waitFor(() => {
+      expect(screen.getByText(SERVER_REFUSAL)).toBeInTheDocument();
+    });
+
+    expect(textField()).toHaveFocus();
+    expect(submitButton()).not.toHaveFocus();
+  });
+
+  it('leaves focus where the user moved it during the request', async () => {
+    stubBrowserChannel('denied');
+    const { user } = await setup(async (input) => {
+      dropFocusLikeABrowser();
+      // The user moves on while the request is on the wire.
+      textField().focus();
+      return makeReminder(input);
+    });
+
+    await fill(user, 'Call the dentist', FUTURE_DATE, FUTURE_TIME);
+    await submit(user);
+
+    await waitFor(() => {
+      expect(textField()).toHaveValue('');
+    });
+
+    expect(textField()).toHaveFocus();
+    expect(submitButton()).not.toHaveFocus();
+  });
+
+  it('keeps focus in the text field when the form is submitted with Enter from it', async () => {
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup();
+
+    await fill(user, '', FUTURE_DATE, FUTURE_TIME);
+    await user.type(textField(), 'Call the dentist{Enter}');
+
+    await waitFor(() => {
+      expect(createMock).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(textField()).toHaveValue('');
+    });
+
+    expect(textField()).toHaveFocus();
+  });
+});
+
 describe('a successful create', () => {
   it('clears the three inputs and the message, and counts from zero again', async () => {
     stubBrowserChannel('denied');
@@ -657,10 +769,13 @@ describe('a failed create', () => {
     expect(textField()).toHaveAttribute('aria-describedby', message.id);
     expect(message.parentElement).toContainElement(textField());
     expect(textField()).toHaveAttribute('aria-invalid', 'true');
-    // Three regions and no fourth: a failure the server attributed to an input is reported under that
-    // input rather than added at form level as well.
-    expect(messageRegions()).toHaveLength(3);
+    // The server named the text, so the text field is where the user is sent to correct it.
+    expect(textField()).toHaveFocus();
+    // Under that input and nowhere else: a failure the server attributed to an input is not repeated
+    // at form level, so the form-level region stays empty.
+    expect(messageRegions()).toHaveLength(4);
     expect(messageRegions()[0]?.textContent).toBe(SERVER_REFUSAL);
+    expect(messageRegions()[3]?.textContent).toBe('');
 
     // Every entered value survives a refused create: the form is never emptied on an assumption.
     expect(textField()).toHaveValue('Call the dentist');
@@ -680,13 +795,49 @@ describe('a failed create', () => {
     });
 
     // Form level: the form's fourth message region, outside every field wrapper, and neither input
-    // is accused of anything.
+    // is accused of anything — nor focused, since there is no input to send the user to.
     const regions = messageRegions();
     expect(regions).toHaveLength(4);
     expect(regions.at(-1)?.textContent).toBe(GENERIC_ERROR);
+    expect(regions.at(-1)?.parentElement).toBe(form());
+    expect(regions[0]?.textContent).toBe('');
+    expect(regions[2]?.textContent).toBe('');
     expect(textField()).toHaveAttribute('aria-invalid', 'false');
     expect(dateField()).toHaveAttribute('aria-invalid', 'false');
     expect(timeField()).toHaveAttribute('aria-invalid', 'false');
+    expect(textField()).not.toHaveFocus();
+    expect(dateField()).not.toHaveFocus();
+    expect(timeField()).not.toHaveFocus();
+
+    expect(textField()).toHaveValue('Call the dentist');
+    expect(dateField()).toHaveValue(FUTURE_DATE);
+    expect(timeField()).toHaveValue(FUTURE_TIME);
+  });
+
+  it('shows a server refusal of the due time under the pair and focuses the pair, keeping the values', async () => {
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup(async () => failWith(SERVER_REFUSAL, 400, 'dueAt'));
+
+    await fill(user, 'Call the dentist', FUTURE_DATE, FUTURE_TIME);
+    await submit(user);
+
+    await waitFor(() => {
+      expect(screen.getByText(SERVER_REFUSAL)).toBeInTheDocument();
+    });
+
+    const message = screen.getByText(SERVER_REFUSAL);
+
+    expect(createMock).toHaveBeenCalledTimes(1);
+    // The pair's one region carries the server's wording, and both of its controls point at it.
+    expect(messageRegions()[2]).toBe(message);
+    expect(dateField()).toHaveAttribute('aria-describedby', message.id);
+    expect(timeField()).toHaveAttribute('aria-describedby', message.id);
+    expect(dateField()).toHaveAttribute('aria-invalid', 'true');
+    expect(timeField()).toHaveAttribute('aria-invalid', 'true');
+    expect(textField()).toHaveAttribute('aria-invalid', 'false');
+    // Both controls hold a value, so the pair's first control is the one focused.
+    expect(dateField()).toHaveFocus();
+    expect(messageRegions()[3]?.textContent).toBe('');
 
     expect(textField()).toHaveValue('Call the dentist');
     expect(dateField()).toHaveValue(FUTURE_DATE);
