@@ -37,6 +37,10 @@
           extra container element: none of them is part of what this screen does, and the accessible
           regions, labels and live areas are the React components' responsibility rather than this
           document's.
+        - No icon reference, deliberately, even though a browser then requests /favicon.ico on its
+          own and the server answers it 404 by design (a path naming a file it does not have). That
+          one console line is the browser reporting a missing icon, not an application error, so it
+          is not silenced with an icon link here.
     -->
   </head>
   <body>
