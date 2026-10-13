@@ -158,6 +158,16 @@ const app = createApp({ store, now });
 // reachable from the same address.
 const port = resolvePort(process.env.PORT);
 
-app.listen(port, () => {
+// Express 5 hands a failure to bind — a port already in use, or one the process
+// may not open — to this callback as its argument instead of raising it. The
+// failure is re-thrown here, so the process stops with that error and a non-zero
+// exit status, exactly as every other startup failure above does; ignoring the
+// argument would print the listening line for a server that is not listening
+// and then exit as though it had succeeded.
+app.listen(port, (error?: Error) => {
+  if (error !== undefined) {
+    throw error;
+  }
+
   console.log(`Reminder app listening on http://localhost:${port}`);
 });

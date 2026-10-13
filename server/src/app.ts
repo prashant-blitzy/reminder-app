@@ -177,12 +177,21 @@ function resolveClientBuildDirectory(): string | undefined {
  * Mounts the client's production build: its static files, then the fallback
  * that serves its entry document for a path no file matched.
  *
- * The fallback is what lets the client be reached at any path rather than only
- * at the files the build happens to contain. It must not shadow the API: since
- * it is registered after the API mount and matches every path, a request whose
- * path lies under the API prefix is passed on instead of being answered with the
- * client's document, so an unknown API path keeps the API's answer rather than
- * becoming a page.
+ * The fallback is what lets the client be reached at any page path rather than
+ * only at the files the build happens to contain. It passes two kinds of request
+ * on instead of answering them with the entry document:
+ *
+ *   - a path under the API prefix. The fallback is registered after the API
+ *     mount and matches every path, so without this an unknown API path would
+ *     become a page rather than keep the API's answer.
+ *   - a path that names a file — its last segment carries an extension, such as
+ *     `/favicon.ico` or a stale `/assets/index-<hash>.js`. The static handler
+ *     above has already looked for that file and not found it, so the honest
+ *     answer is a 404. Sending the entry document instead would report an absent
+ *     file as present, with HTML where an icon, a script or a stylesheet was
+ *     expected, which surfaces in the browser as a misleading MIME-type error
+ *     rather than as the missing file it is. Page paths carry no extension, so
+ *     every path the client can actually be opened at still reaches it.
  *
  * @param app The application to mount onto.
  * @param clientDirectory The absolute path of the built client, which the caller
@@ -192,12 +201,18 @@ function serveBuiltClient(app: Express, clientDirectory: string): void {
   app.use(express.static(clientDirectory));
 
   app.get(SPA_FALLBACK_ROUTE, (req: Request, res: Response, next: NextFunction): void => {
-    if (req.path.startsWith(API_MOUNT_PATH)) {
+    if (req.path.startsWith(API_MOUNT_PATH) || path.posix.extname(req.path) !== '') {
       next();
       return;
     }
 
-    res.sendFile(path.join(clientDirectory, CLIENT_ENTRY_FILE_NAME));
+    // The entry document is named relative to the build directory, passed as the
+    // root, rather than as one absolute path. The file sender refuses any path
+    // with a segment that starts with a dot unless the segment lies inside the
+    // root it was given; with an absolute path and no root, a checkout placed
+    // under any dot-prefixed directory would answer every page path with an
+    // error while `/` still worked through the static handler.
+    res.sendFile(CLIENT_ENTRY_FILE_NAME, { root: clientDirectory });
   });
 }
 
