@@ -283,8 +283,9 @@ function main(): void {
     const inserted = seedReminders(resolvedCount.count);
 
     // The whole of this script's standard output: one line, no reminder text,
-    // no identifier, no database path.
-    console.log(`Inserted ${inserted} reminders.`);
+    // no identifier, no database path. The noun follows the count, so an
+    // explicit count of one reads "Inserted 1 reminder."
+    console.log(`Inserted ${inserted} ${inserted === 1 ? 'reminder' : 'reminders'}.`);
   } catch (error) {
     process.stderr.write(`Seeding reminders failed: ${describeError(error)}\n`);
     process.exitCode = 1;
