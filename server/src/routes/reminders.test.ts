@@ -19,7 +19,7 @@
 
 import type { Express } from 'express';
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../app';
 import { createDatabase } from '../data/database';
@@ -47,8 +47,33 @@ const PAST_ISO = '2026-05-31T10:00:00.000Z';
  */
 const JUST_AFTER_ISO = new Date(Date.parse(NOW_ISO) + 1_000).toISOString();
 
+/**
+ * An instant after {@link NOW_ISO} that only the repeated-claim test moves its
+ * clock to, so a second claim that overwrote the first would record a value the
+ * assertions can tell apart from the first claim's.
+ */
+const LATER_CLAIM_ISO = '2026-06-01T10:30:00.000Z';
+
+/**
+ * The shape `crypto.randomUUID()` produces: a lowercase version-4 UUID, whose
+ * version nibble is `4` and whose variant nibble is one of `8`, `9`, `a`, `b`.
+ */
+const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 /** The pinned clock: the application's `now` and the store's `now` are this one accessor. */
 const fixedNow = (): string => NOW_ISO;
+
+/**
+ * Every database a test opened, closed once that test ends so no handle
+ * outlives the test that needed it.
+ */
+const openDatabases: Array<ReturnType<typeof createDatabase>> = [];
+
+afterEach(() => {
+  for (const db of openDatabases.splice(0)) {
+    db.close();
+  }
+});
 
 /**
  * Builds the application the way `server/src/index.ts` will, over the given
@@ -60,9 +85,18 @@ function buildApp(store: ReminderStore, now: () => string = fixedNow): Express {
   return createApp({ store, now });
 }
 
-/** A store over a fresh in-memory database, sharing the pinned clock. */
-function buildStore(): ReminderStore {
-  return createReminderStore(createDatabase(':memory:'), fixedNow);
+/**
+ * A store over a fresh in-memory database — the schema applied by the same
+ * `createDatabase` production uses, nothing written to disk — built with the
+ * given clock, which the caller passes to {@link buildApp} as well so the store
+ * and the application read one accessor. The handle is registered for closing
+ * after the test.
+ */
+function buildStore(now: () => string = fixedNow): ReminderStore {
+  const db = createDatabase(':memory:');
+  openDatabases.push(db);
+
+  return createReminderStore(db, now);
 }
 
 /**
@@ -119,9 +153,7 @@ describe('POST /api/reminders', () => {
     expect(res.body.completed).toBe(false);
     expect(res.body.notifiedAt).toBeNull();
     expect(res.body.createdAt).toBe(NOW_ISO);
-    expect(res.body.id).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-    );
+    expect(res.body.id).toMatch(UUID_V4_PATTERN);
   });
 
   it('stores the due instant byte-for-byte as it was received', async () => {
@@ -153,6 +185,7 @@ describe('POST /api/reminders', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.id).not.toBe('hacked');
+    expect(res.body.id).toMatch(UUID_V4_PATTERN);
     expect(res.body.completed).toBe(false);
     expect(res.body.notifiedAt).toBeNull();
     expect(res.body.createdAt).toBe(NOW_ISO);
@@ -336,27 +369,39 @@ describe('GET /api/reminders', () => {
   it('orders by dueAt ascending and breaks a shared due time by id', async () => {
     const app = buildApp(buildStore());
 
+    // The latest-due reminder is created first, so its last place in the list
+    // shows the order is not insertion order.
     const later = await request(app).post('/api/reminders').send({ text: 'later', dueAt: LATER_ISO });
-    const tieOne = await request(app)
-      .post('/api/reminders')
-      .send({ text: 'tie one', dueAt: FUTURE_ISO });
-    const tieTwo = await request(app)
-      .post('/api/reminders')
-      .send({ text: 'tie two', dueAt: FUTURE_ISO });
+
+    // Several reminders share one due time. Their ids are random, so with eight
+    // of them the chance that insertion order happens to equal id order is
+    // 1 in 40,320: an ordering that dropped the id tiebreak and fell back to
+    // insertion order fails this test rather than passing by luck, as it would
+    // half the time with two.
+    const tiedCount = 8;
+    const tiedIds: string[] = [];
+
+    for (let index = 0; index < tiedCount; index += 1) {
+      const created = await request(app)
+        .post('/api/reminders')
+        .send({ text: `tie ${index}`, dueAt: FUTURE_ISO });
+
+      expect(created.status).toBe(201);
+      tiedIds.push(created.body.id);
+    }
 
     const res = await request(app).get('/api/reminders');
 
     expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(3);
+    expect(res.body).toHaveLength(tiedCount + 1);
     expect(res.body.map((reminder: Reminder) => reminder.dueAt)).toEqual([
-      FUTURE_ISO,
-      FUTURE_ISO,
+      ...Array.from({ length: tiedCount }, () => FUTURE_ISO),
       LATER_ISO,
     ]);
-    expect([res.body[0].id, res.body[1].id]).toEqual(
-      [tieOne.body.id, tieTwo.body.id].sort(),
+    expect(res.body.slice(0, tiedCount).map((reminder: Reminder) => reminder.id)).toEqual(
+      [...tiedIds].sort(),
     );
-    expect(res.body[2].id).toBe(later.body.id);
+    expect(res.body[tiedCount].id).toBe(later.body.id);
   });
 
   it('reflects a persisted change on the next read', async () => {
@@ -442,23 +487,54 @@ describe('PATCH /api/reminders/:id/notified', () => {
     expect(res.body.notifiedAt).toBe(NOW_ISO);
   });
 
-  it('answers 200 with the first claim intact when the claim is repeated', async () => {
-    const store = buildStore();
-    const app = buildApp(store);
+  it('answers 200 with the first claim intact when the claim is repeated later', async () => {
+    // This test alone moves its clock between the two claims. With the clock
+    // fixed, a second claim that overwrote the first would record the very same
+    // instant and the non-overwrite assertions below would pass vacuously. The
+    // clock is still one injected accessor shared by the store and the
+    // application, and it never reads the wall clock.
+    let currentInstant = NOW_ISO;
+    const steppedNow = (): string => currentInstant;
+    const store = buildStore(steppedNow);
+    const app = buildApp(store, steppedNow);
     const created = await request(app)
       .post('/api/reminders')
       .send({ text: 'Ring the bell', dueAt: FUTURE_ISO });
 
     const first = await request(app).patch(`/api/reminders/${created.body.id}/notified`);
-    const repeated = await request(app)
-      .patch(`/api/reminders/${created.body.id}/notified`)
-      .send({ notifiedAt: '2000-01-01T00:00:00.000Z' });
+
+    currentInstant = LATER_CLAIM_ISO;
+    const repeated = await request(app).patch(`/api/reminders/${created.body.id}/notified`);
 
     // The claim is durable and is won once: a repeat is a known reminder in the
     // state the caller asked for, and the recorded instant never moves.
+    expect(first.status).toBe(200);
+    expect(first.body.notifiedAt).toBe(NOW_ISO);
     expect(repeated.status).toBe(200);
-    expect(repeated.body.notifiedAt).toBe(first.body.notifiedAt);
+    expect(repeated.body.notifiedAt).toBe(NOW_ISO);
     expect(store.get(created.body.id)?.notifiedAt).toBe(NOW_ISO);
+
+    const listed = await request(app).get('/api/reminders');
+    expect(listed.body[0].notifiedAt).toBe(NOW_ISO);
+  });
+
+  it('ignores a body sent with the claim', async () => {
+    const app = buildApp(buildStore());
+    const created = await request(app)
+      .post('/api/reminders')
+      .send({ text: 'Ring the bell', dueAt: FUTURE_ISO });
+
+    const res = await request(app).patch(`/api/reminders/${created.body.id}/notified`).send({
+      notifiedAt: '2000-01-01T00:00:00.000Z',
+      completed: true,
+      text: 'Rewritten',
+      dueAt: LATER_ISO,
+    });
+
+    // The claim takes no input: the instant recorded is the clock's, and every
+    // other field is exactly as it was created.
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ...created.body, notifiedAt: NOW_ISO });
   });
 
   it('returns 404 for an unknown id', async () => {
