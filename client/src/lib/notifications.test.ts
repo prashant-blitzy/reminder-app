@@ -60,6 +60,15 @@ const BROWSER_NOTIFICATION_TITLE = 'Reminder';
 /** The module under test, as a freshly loaded instance. */
 type NotificationsModule = typeof import('./notifications');
 
+/** A channel snapshot, exactly as the module under test produces it. */
+type ChannelSnapshotView = ReturnType<NotificationsModule['getChannelSnapshot']>;
+
+/** A channel reading the module reports, exactly as it types it. */
+type ChannelReading = ChannelSnapshotView['permission'];
+
+/** One of the three readings a browser's own `Notification.permission` can report. */
+type BrowserReading = Exclude<ChannelReading, 'unsupported'>;
+
 /** One call the code under test made on the fake `Notification` constructor. */
 interface BrowserCall {
   /** The notification's title: the constructor's first argument. */
@@ -107,8 +116,15 @@ interface FakeBrowserChannel {
   /** Sets the reading the fake reports, as the platform does when the user changes it. */
   setPermission(reading: unknown): void;
 
-  /** Sets how the fake's `requestPermission` behaves. */
-  setRequestPermission(behaviour: RequestBehaviour): void;
+  /**
+   * Sets how the fake's `requestPermission` behaves.
+   *
+   * @param behaviour The answer, a rejection, or no callable member at all.
+   * @param reportsReading When given, the reading the fake reports from the moment it is asked,
+   *   before its promise settles — which is what a real browser does when the user answers. When
+   *   omitted, the fake's reading stays where it was, like a platform that reports the answer late.
+   */
+  setRequestPermission(behaviour: RequestBehaviour, reportsReading?: unknown): void;
 
   /** Sets how the fake's constructor behaves. */
   setConstructor(behaviour: ConstructorBehaviour): void;
@@ -179,7 +195,7 @@ function installFakeBrowserChannel(reading: unknown): FakeBrowserChannel {
 
   vi.stubGlobal('Notification', FakeNotification);
 
-  function setRequestPermission(behaviour: RequestBehaviour): void {
+  function setRequestPermission(behaviour: RequestBehaviour, reportsReading?: unknown): void {
     if (behaviour === 'missing') {
       delete FakeNotification.requestPermission;
       return;
@@ -193,6 +209,12 @@ function installFakeBrowserChannel(reading: unknown): FakeBrowserChannel {
 
     FakeNotification.requestPermission = (): Promise<unknown> => {
       requestPermissionCalls += 1;
+
+      if (reportsReading !== undefined) {
+        // The global moves before the promise settles, exactly as Chrome's does: by the time the
+        // caller's `await` resumes, `Notification.permission` already reports the answer.
+        FakeNotification.permission = reportsReading;
+      }
 
       if (behaviour === 'reject') {
         return Promise.reject(new Error('the user dismissed the prompt'));
@@ -559,6 +581,116 @@ describe('requestPermission — the browser is contacted only from the default r
     await expect(notifications.requestPermission()).resolves.toBe('default');
 
     expect(channel.requestPermissionCalls(), 'a non-callable member is never called').toBe(0);
+  });
+});
+
+describe('requestPermission — subscribers learn the answer the moment it arrives', () => {
+  // A real browser updates `Notification.permission` itself as soon as the user answers, before the
+  // request's promise settles: measured in Chrome, where the global already read `denied` when the
+  // promise resolved. A reading compared only after the answer therefore looks unchanged, so the
+  // banner — which re-renders only when told — would keep promising that notifications "will be
+  // requested" for up to one due-check interval after the user had already answered. These cases
+  // use a fake that moves its own reading the way the browser does.
+
+  /**
+   * Asks from `default` on a browser that moves its own reading to `reportsReading` as soon as it is
+   * asked, counting the signals a subscriber registered beforehand receives.
+   */
+  async function askOnBrowserThatReports(
+    behaviour: RequestBehaviour,
+    reportsReading: BrowserReading,
+  ): Promise<{
+    channel: FakeBrowserChannel;
+    notifications: NotificationsModule;
+    before: ChannelSnapshotView;
+    reading: ChannelReading;
+    signals: () => number;
+  }> {
+    const channel = installFakeBrowserChannel('default');
+    channel.setRequestPermission(behaviour, reportsReading);
+    const notifications = await loadNotifications();
+
+    let signalCount = 0;
+    notifications.subscribe(() => {
+      signalCount += 1;
+    });
+
+    const before = notifications.getChannelSnapshot();
+    expect(before.bannerText).toBe(DEFAULT_BANNER);
+
+    const reading = await notifications.requestPermission();
+
+    return { channel, notifications, before, reading, signals: () => signalCount };
+  }
+
+  it('signals once and shows the blocked line when the browser answers denied', async () => {
+    const { channel, notifications, before, reading, signals } = await askOnBrowserThatReports(
+      'denied',
+      'denied',
+    );
+
+    expect(reading).toBe('denied');
+    expect(channel.requestPermissionCalls()).toBe(1);
+    expect(signals(), 'the banner must be told the moment the answer arrives').toBe(1);
+
+    const after = notifications.getChannelSnapshot();
+    expect(after).not.toBe(before);
+    expect(after.permission).toBe('denied');
+    expect(after.bannerText).toBe(DENIED_BANNER);
+  });
+
+  it('signals once and shows the granted line when the browser answers granted', async () => {
+    const { notifications, before, reading, signals } = await askOnBrowserThatReports(
+      'granted',
+      'granted',
+    );
+
+    expect(reading).toBe('granted');
+    expect(signals(), 'the banner must be told the moment the answer arrives').toBe(1);
+
+    const after = notifications.getChannelSnapshot();
+    expect(after).not.toBe(before);
+    expect(after.permission).toBe('granted');
+    expect(after.bannerText).toBe(GRANTED_BANNER);
+  });
+
+  it('signals once when the browser moves its reading and then rejects the request', async () => {
+    const { notifications, reading, signals } = await askOnBrowserThatReports('reject', 'denied');
+
+    // A rejection is not a reading, but the platform did answer: the module must report the
+    // reading the platform now holds, and tell the banner about it.
+    expect(reading).toBe('denied');
+    expect(signals()).toBe(1);
+    expect(notifications.getChannelSnapshot().bannerText).toBe(DENIED_BANNER);
+  });
+
+  it('signals once when the platform reports the answer late, as the plain fake does', async () => {
+    const channel = installFakeBrowserChannel('default');
+    channel.setRequestPermission('denied');
+    const notifications = await loadNotifications();
+
+    let signals = 0;
+    notifications.subscribe(() => {
+      signals += 1;
+    });
+
+    await expect(notifications.requestPermission()).resolves.toBe('denied');
+
+    expect(signals).toBe(1);
+    expect(notifications.getChannelSnapshot().bannerText).toBe(DENIED_BANNER);
+  });
+
+  it('stays silent when the request ends with the reading unchanged', async () => {
+    const { notifications, before, reading, signals } = await askOnBrowserThatReports(
+      'reject',
+      'default',
+    );
+
+    // Nothing changed, so nothing is announced and the snapshot keeps its identity: a spurious
+    // signal is harmless to `useSyncExternalStore`, but the module promises one per real change.
+    expect(reading).toBe('default');
+    expect(signals()).toBe(0);
+    expect(notifications.getChannelSnapshot()).toBe(before);
   });
 });
 

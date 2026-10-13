@@ -327,6 +327,12 @@ async function completeRequest(
   request: (this: unknown) => unknown,
   requestedFromReading: PermissionState,
 ): Promise<PermissionState> {
+  // The reading subscribers last saw is taken BEFORE the browser is asked. A real browser updates
+  // `Notification.permission` itself the moment the user answers, so a reading taken after the
+  // `await` already equals the answer, the change looks like no change, and the banner keeps
+  // showing the `default` line until some unrelated re-render happens to correct it.
+  const previous = readPermission();
+
   let outcome: unknown;
 
   try {
@@ -337,7 +343,6 @@ async function completeRequest(
     outcome = undefined;
   }
 
-  const previous = readPermission();
   const resolved = isBrowserPermission(outcome) ? outcome : readGlobalPermission();
 
   requestedFrom = requestedFromReading;

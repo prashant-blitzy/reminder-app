@@ -58,8 +58,10 @@
   --field-basis-text: 15rem;
   /* 10rem, not narrower: the platform date and time pickers render the full value plus
      their picker indicator inside the input's padding, and at 8rem Chrome clipped a
-     filled date to "10/14/202" and a filled time to "11:00 AN". */
+     filled date to "10/14/202" and a filled time to "11:00 AN". 10rem is also the
+     smallest basis that shows the empty "mm/dd/yyyy" placeholder in full. */
   --field-basis-date: 10rem;
+  --field-basis-line: 100%;
 
   /* Spacing scale, used for padding, gaps and margins alike */
   --space-1: 0.25rem;
@@ -298,7 +300,11 @@ input {
   border-radius: var(--radius);
 }
 
+/* The counter takes a line of its own, directly under the fields. Its width grows as the
+   count gains digits, so sharing the fields' line would let typing re-wrap the row and move
+   the submit control under the user's pointer. */
 .reminder-form__counter {
+  flex: 1 0 var(--field-basis-line);
   margin: 0;
   color: var(--color-text-muted);
   font-size: var(--font-size-sm);
