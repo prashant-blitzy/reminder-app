@@ -487,6 +487,22 @@ describe('a refused submission', () => {
     expect(createMock).not.toHaveBeenCalled();
   });
 
+  it('focuses the date control when only the date is missing', async () => {
+    stubBrowserChannel('denied');
+    const { createMock, user } = await setup();
+
+    await fill(user, 'Call the dentist', '', FUTURE_TIME);
+    await submit(user);
+
+    const message = screen.getByText(DUE_AT_INVALID);
+
+    expect(dateField()).toHaveFocus();
+    expect(dateField()).toHaveAttribute('aria-describedby', message.id);
+    // The time the user did pick is left exactly as they picked it.
+    expect(timeField()).toHaveValue(FUTURE_TIME);
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
   it('focuses the time control when only the time is missing', async () => {
     stubBrowserChannel('denied');
     const { createMock, user } = await setup();
@@ -532,6 +548,22 @@ describe('a refused submission', () => {
 
     expect(timeField()).toHaveAttribute('aria-describedby', message.id);
     expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('clears the text message when the text field is edited', async () => {
+    stubBrowserChannel('denied');
+    const { user } = await setup();
+
+    await fill(user, '', FUTURE_DATE, FUTURE_TIME);
+    await submit(user);
+    expect(screen.getByText(TEXT_REQUIRED)).toBeInTheDocument();
+
+    // One keystroke is the start of a correction, which is enough to withdraw the refusal.
+    await user.type(textField(), 'C');
+
+    expect(screen.queryByText(TEXT_REQUIRED)).not.toBeInTheDocument();
+    expect(messageRegions()[0]?.textContent).toBe('');
+    expect(textField()).toHaveAttribute('aria-invalid', 'false');
   });
 
   it('clears the due-time message when one of its two controls is edited', async () => {

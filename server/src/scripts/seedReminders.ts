@@ -230,7 +230,10 @@ function seedReminders(count: number): number {
 
   try {
     const store = createReminderStore(db, now);
-    const firstDueAtMs = Date.now() + DUE_STEP_MS;
+    // The origin is read through the same accessor the store stamps `createdAt`
+    // with, never from the wall clock directly, so this process reads time in one
+    // place, as the server process does.
+    const firstDueAtMs = Date.parse(now()) + DUE_STEP_MS;
 
     let inserted = 0;
 
